@@ -19,7 +19,7 @@ GITHUB_REPO = os.getenv("GITHUB_REPOSITORY")
 MAX_RUNTIME = 5.5 * 3600
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-AI_MODEL_NAME = "gemini-2.5-flash"
+AI_MODEL_NAME = "gemini-1.5-flash"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -359,8 +359,15 @@ async def chat_with_ai(message):
         short = "\n".join(lines[:4])
         if len(short) > 350:
             short = short[:347] + "..."
-        sent = await bot.send_message(message.chat.id, short + "\n\n_... (رد مختصر)_",
-                                      parse_mode="Markdown", reply_markup=short_answer_menu(0))
+        try:
+            sent = await bot.send_message(
+                message.chat.id, short + "\n\n_... (رد مختصر)_",
+                parse_mode="Markdown", reply_markup=short_answer_menu(0))
+        except Exception as markdown_error:
+            logging.warning(f"Markdown chat response failed; retrying as plain text: {markdown_error}")
+            sent = await bot.send_message(
+                message.chat.id, short + "\n\n... (رد مختصر)",
+                reply_markup=short_answer_menu(0))
         short_answers_cache[sent.message_id] = full
         await bot.edit_message_reply_markup(message.chat.id, sent.message_id,
                                             reply_markup=short_answer_menu(sent.message_id))
