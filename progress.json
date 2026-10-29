@@ -180,6 +180,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "7783656246": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": "الرياضيات",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
