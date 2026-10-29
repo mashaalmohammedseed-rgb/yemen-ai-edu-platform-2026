@@ -854,7 +854,7 @@ async def main():
         # Telegram long polling conflicts with a configured webhook; clear it first.
         for attempt in range(1, 6):
             try:
-                await bot.delete_webhook(drop_pending_updates=True)
+                await bot.delete_webhook(drop_pending_updates=False)
                 logging.info("Webhook cleared; starting long polling")
                 break
             except asyncio.CancelledError:
@@ -932,4 +932,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
