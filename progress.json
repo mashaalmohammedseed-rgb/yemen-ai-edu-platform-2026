@@ -44,6 +44,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "8759460556": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "sanaa",
+      "stream": "scientific",
+      "subject": "الرياضيات",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
