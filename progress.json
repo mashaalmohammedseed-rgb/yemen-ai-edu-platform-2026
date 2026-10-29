@@ -1,13 +1,18 @@
 {
   "users": {
     "7254512697": {
-      "onboarding_done": false,
-      "situation": null,
-      "stream": null,
-      "subject": null,
-      "streak": 0,
-      "last_session": null,
-      "exams": [],
+      "onboarding_done": true,
+      "situation": "emergency",
+      "stream": "scientific",
+      "subject": "الإنجليزي",
+      "streak": 1,
+      "last_session": "2026-10-29T02:12:39.547181",
+      "exams": [
+        {
+          "subject": "الإنجليزي",
+          "days": 3
+        }
+      ],
       "completed_units": [],
       "quiz_history": []
     }
