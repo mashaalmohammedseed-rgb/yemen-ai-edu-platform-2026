@@ -19,10 +19,7 @@ GITHUB_REPO = os.getenv("GITHUB_REPOSITORY")
 MAX_RUNTIME = 5.5 * 3600
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    system_instruction=content.AI_SYSTEM_PROMPT
-)
+AI_MODEL_NAME = "gemini-2.5-flash"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -154,12 +151,25 @@ def get_progress(uid):
     return progress_cache.get(str(uid), {})
 
 
+def get_curriculum_ar(uid):
+    curriculum = get_progress(uid).get("curriculum")
+    return {"sanaa": "صنعاء", "aden": "عدن"}.get(curriculum, "غير محدد")
+
+
+def get_user_model(uid):
+    return genai.GenerativeModel(
+        model_name=AI_MODEL_NAME,
+        system_instruction=content.AI_SYSTEM_PROMPT.format(
+            curriculum_ar=get_curriculum_ar(uid))
+    )
+
+
 def update_progress(uid, **kwargs):
     global progress_dirty
     uid = str(uid)
     if uid not in progress_cache:
-        progress_cache[uid] = {"onboarding_done": False, "situation": None, "stream": None,
-                               "subject": None, "streak": 0, "last_session": None,
+        progress_cache[uid] = {"onboarding_done": False, "situation": None, "curriculum": None,
+                               "stream": None, "subject": None, "streak": 0, "last_session": None,
                                "exams": [], "completed_units": [], "quiz_history": []}
     progress_cache[uid].update(kwargs)
     progress_dirty = True
@@ -295,6 +305,13 @@ def onboarding_situations_kb():
     ])
 
 
+def onboarding_curriculum_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏛️ منهج وزارة التربية (صنعاء)", callback_data="onb_curr_sanaa")],
+        [InlineKeyboardButton(text="🌍 منهج وزارة التربية (عدن)", callback_data="onb_curr_aden")],
+    ])
+
+
 def onboarding_streams_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔬 علمي", callback_data="onb_sci")],
@@ -334,7 +351,7 @@ async def chat_with_ai(message):
         await bot.send_chat_action(chat_id=message.chat.id, action="typing")
         session = chat_sessions.get(uid)
         if not session:
-            session = model.start_chat(history=[])
+            session = get_user_model(uid).start_chat(history=[])
             chat_sessions[uid] = session
         response = await session.send_message_async(message.text)
         full = response.text
@@ -374,12 +391,15 @@ async def show_progress(cb):
     situation_map = {"emergency": "🔥 امتحان قريب", "backlog": "⏰ منهج متراكم",
                      "start": "📚 بداية الفصل", "regular": "✅ منتظم"}
     stream_map = {"scientific": "🔬 علمي", "literary": "📖 أدبي"}
+    curriculum_map = {"sanaa": "وزارة التربية (صنعاء)", "aden": "وزارة التربية (عدن)"}
     subject = p.get("subject") or "لم تبدأ بعد"
     situation = situation_map.get(p.get("situation"), "غير محدد")
     stream = stream_map.get(p.get("stream"), "غير محدد")
+    curriculum = curriculum_map.get(p.get("curriculum"), "غير محدد")
     quizzes = p.get("quiz_history", [])
     text = (f"📊 *تقدمك يا {cb.from_user.first_name or 'صديقي'}*\n\n"
             f"*وضعك:* {situation}\n"
+            f"*المنهج:* {curriculum}\n"
             f"*قسمك:* {stream}\n"
             f"*المادة الحالية:* {subject}\n"
             f"*🔥 سلسلة الدراسة:* {streak} أيام متتالية\n\n"
@@ -426,6 +446,10 @@ async def handle_message(msg):
         chat_mode[uid] = False
         chat_sessions.pop(uid, None)
         p = get_progress(uid)
+        if p.get("onboarding_done") and not p.get("curriculum"):
+            await msg.answer(content.ONBOARDING_CURRICULUM,
+                             reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
+            return
         if not p.get("onboarding_done"):
             update_progress(uid, onboarding_done=False)
             await msg.answer(content.ONBOARDING_WELCOME, parse_mode="Markdown")
@@ -450,7 +474,7 @@ async def handle_message(msg):
 
     if text == "/chat":
         chat_mode[uid] = True
-        chat_sessions[uid] = model.start_chat(history=[])
+        chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
         await msg.answer(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
         return
 
@@ -536,8 +560,21 @@ async def handle_callback(cb):
         if data in ("onb_emergency", "onb_backlog", "onb_start", "onb_regular"):
             situation = data.replace("onb_", "")
             update_progress(uid, situation=situation)
-            await cb.message.edit_text(content.ONBOARDING_STREAM,
-                                        reply_markup=onboarding_streams_kb(), parse_mode="Markdown")
+            await cb.message.edit_text(content.ONBOARDING_CURRICULUM,
+                                        reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
+        elif data in ("onb_curr_sanaa", "onb_curr_aden"):
+            curriculum = "sanaa" if data == "onb_curr_sanaa" else "aden"
+            p = get_progress(uid)
+            chat_sessions.pop(uid, None)
+            update_progress(uid, curriculum=curriculum)
+            if p.get("onboarding_done"):
+                curriculum_name = {"sanaa": "صنعاء", "aden": "عدن"}[curriculum]
+                await cb.message.edit_text(
+                    f"✅ تم حفظ منهج مدرستك: *وزارة التربية ({curriculum_name})*.",
+                    reply_markup=main_menu(), parse_mode="Markdown")
+            else:
+                await cb.message.edit_text(content.ONBOARDING_STREAM,
+                                            reply_markup=onboarding_streams_kb(), parse_mode="Markdown")
         elif data in ("onb_sci", "onb_lit"):
             stream = "scientific" if data == "onb_sci" else "literary"
             update_progress(uid, stream=stream)
@@ -552,8 +589,9 @@ async def handle_callback(cb):
                             "start": "📚 بداية", "regular": "✅ منتظم"}.get(p.get("situation"), "")
             stream_ar = "🔬 علمي" if p.get("stream") == "scientific" else "📖 أدبي"
             next_step = "اضغط 🔥 وضع الطوارئ" if p.get("situation") == "emergency" else "اضغط 📖 أفهم مادة"
-            text = content.ONBOARDING_DONE.format(situation=situation_ar, stream=stream_ar,
-                                                   subject=subject, next_step=next_step)
+            text = content.ONBOARDING_DONE.format(
+                situation=situation_ar, curriculum=get_curriculum_ar(uid),
+                stream=stream_ar, subject=subject, next_step=next_step)
             await cb.message.edit_text(text, reply_markup=main_menu(), parse_mode="Markdown")
 
         elif data == "home":
@@ -589,26 +627,31 @@ async def handle_callback(cb):
             p = get_progress(uid)
             text = content.UNDERSTAND_PROMPT.format(
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
-                stream="علمي" if p.get("stream") == "scientific" else "أدبي")
+                stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                curriculum_ar=get_curriculum_ar(uid))
             await cb.message.edit_text(text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "quiz_prompt":
             p = get_progress(uid)
             text = content.QUIZ_PROMPT.format(
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
-                stream="علمي" if p.get("stream") == "scientific" else "أدبي")
+                stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                curriculum_ar=get_curriculum_ar(uid))
             await cb.message.edit_text(text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "weakness_prompt":
             p = get_progress(uid)
-            text = content.WEAKNESS_PROMPT.format(subject=p.get("subject", "[المادة]"), days=7)
+            text = content.WEAKNESS_PROMPT.format(
+                subject=p.get("subject", "[المادة]"), days=7,
+                curriculum_ar=get_curriculum_ar(uid))
             await cb.message.edit_text(text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "predict_prompt":
             p = get_progress(uid)
             text = content.PREDICT_PROMPT.format(
                 subject=p.get("subject", "[المادة]"),
-                stream="علمي" if p.get("stream") == "scientific" else "أدبي")
+                stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                curriculum_ar=get_curriculum_ar(uid))
             await cb.message.edit_text(text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
 
@@ -617,9 +660,13 @@ async def handle_callback(cb):
         elif data == "my_settings":
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 تغيير المادة", callback_data="onb_stream_reset")],
+                [InlineKeyboardButton(text="🌍 تغيير المنهج", callback_data="curriculum_reset")],
                 [InlineKeyboardButton(text="📊 تقدمي", callback_data="my_progress")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
             await cb.message.edit_text("⚙️ *إعداداتي*\n\nاختر:", reply_markup=kb, parse_mode="Markdown")
+        elif data == "curriculum_reset":
+            await cb.message.edit_text(content.ONBOARDING_CURRICULUM,
+                                        reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
         elif data == "onb_stream_reset":
             update_progress(uid, onboarding_done=False)
             await cb.message.edit_text(content.ONBOARDING_SITUATION,
@@ -641,27 +688,30 @@ async def handle_callback(cb):
             subject = data.replace("em_p1_", "")
             p = get_progress(uid)
             prompt = content.EMERGENCY_DAY1_PROMPT.format(
-                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي", days=3)
+                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                days=3, curriculum_ar=get_curriculum_ar(uid))
             await cb.message.answer(f"📖 *برومبت اليوم 1 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
                                     parse_mode="Markdown")
         elif data.startswith("em_p2_"):
             subject = data.replace("em_p2_", "")
             p = get_progress(uid)
             prompt = content.EMERGENCY_DAY2_PROMPT.format(
-                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي", days=3)
+                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                days=3, curriculum_ar=get_curriculum_ar(uid))
             await cb.message.answer(f"🎯 *برومبت اليوم 2 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
                                     parse_mode="Markdown")
         elif data.startswith("em_p3_"):
             subject = data.replace("em_p3_", "")
             p = get_progress(uid)
             prompt = content.EMERGENCY_DAY3_PROMPT.format(
-                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي", days=3)
+                subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
+                days=3, curriculum_ar=get_curriculum_ar(uid))
             await cb.message.answer(f"🔁 *برومبت اليوم 3 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
                                     parse_mode="Markdown")
 
         elif data == "chat_start":
             chat_mode[uid] = True
-            chat_sessions[uid] = model.start_chat(history=[])
+            chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
             await cb.message.edit_text(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
         elif data == "chat_exit":
             chat_mode[uid] = False
