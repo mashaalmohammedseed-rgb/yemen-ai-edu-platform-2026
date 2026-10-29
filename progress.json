@@ -204,6 +204,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "8324120021": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": "الكيمياء",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
