@@ -16,7 +16,8 @@ import content
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPOSITORY")
-MAX_RUNTIME = 5.5 * 3600
+MAX_RUNTIME = 5.75 * 3600  # 345 minutes; keep a 10-minute buffer under the 355-minute job timeout
+KEEP_ALIVE_INTERVAL = 300
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 AI_MODEL_NAME = "gemini-1.5-flash"
@@ -821,6 +822,21 @@ async def handle_chat_member(update):
                 pass
 
 
+async def keep_alive():
+    """Periodically verify Telegram API reachability; cancelled cleanly on shutdown."""
+    task = asyncio.current_task()
+    while task is not None and not task.cancelling():
+        try:
+            await bot.get_me()
+            logging.debug("keep_alive: Telegram API reachable")
+            await asyncio.sleep(KEEP_ALIVE_INTERVAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning(f"keep_alive: Telegram API check failed: {e}")
+            await asyncio.sleep(30)
+
+
 async def main():
     global users_dirty, progress_dirty, audit_dirty
     users_cache.update(load_json("users.json", {"users": {}}).get("users", {}))
@@ -828,26 +844,63 @@ async def main():
     audit_cache["logs"] = load_json("audit_log.json", {"logs": []}).get("logs", [])
 
     offset = get_offset()
-    start_t = asyncio.get_event_loop().time()
-    last_save = start_t
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + MAX_RUNTIME
+    last_save = loop.time()
+    retry_delay = 5
+    keep_alive_task = None
 
-    while True:
-        if asyncio.get_event_loop().time() - start_t > MAX_RUNTIME:
-            save_offset(offset)
-            break
-        try:
-            updates = await bot.get_updates(offset=offset, timeout=25,
-                                            allowed_updates=["message", "callback_query", "chat_member"])
-            for u in updates:
-                offset = u.update_id + 1
-                if u.message and u.message.text:
-                    await handle_message(u.message)
-                elif u.callback_query:
-                    await handle_callback(u.callback_query)
-                elif u.chat_member:
-                    await handle_chat_member(u.chat_member)
+    try:
+        # Telegram long polling conflicts with a configured webhook; clear it first.
+        for attempt in range(1, 6):
+            try:
+                await bot.delete_webhook(drop_pending_updates=True)
+                logging.info("Webhook cleared; starting long polling")
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if attempt == 5:
+                    raise
+                delay = min(2 ** attempt, 30)
+                logging.warning(
+                    f"delete_webhook attempt {attempt}/5 failed: {e}; retrying in {delay}s")
+                await asyncio.sleep(delay)
 
-            if asyncio.get_event_loop().time() - last_save > 300:
+        keep_alive_task = asyncio.create_task(keep_alive(), name="telegram-keep-alive")
+
+        # This polling loop is deliberately bounded by the GitHub Actions runtime.
+        while loop.time() < deadline:
+            try:
+                updates = await bot.get_updates(
+                    offset=offset, timeout=25,
+                    allowed_updates=["message", "callback_query", "chat_member"])
+                retry_delay = 5
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                message = str(e)
+                delay = 30 if "conflict" in message.lower() else retry_delay
+                logging.error(f"get_updates failed: {e}; retrying in {delay}s")
+                await asyncio.sleep(delay)
+                retry_delay = min(retry_delay * 2, 60)
+                continue
+
+            for update in updates:
+                offset = update.update_id + 1
+                try:
+                    if update.message and update.message.text:
+                        await handle_message(update.message)
+                    elif update.callback_query:
+                        await handle_callback(update.callback_query)
+                    elif update.chat_member:
+                        await handle_chat_member(update.chat_member)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logging.exception(f"update {update.update_id} failed: {e}")
+
+            if loop.time() - last_save > 300:
                 save_offset(offset)
                 if users_dirty:
                     save_json("users.json", {"users": users_cache})
@@ -858,19 +911,24 @@ async def main():
                 if audit_dirty:
                     save_json("audit_log.json", audit_cache)
                     audit_dirty = False
-                last_save = asyncio.get_event_loop().time()
-        except Exception as e:
-            logging.error(f"loop: {e}")
-            await asyncio.sleep(5)
+                last_save = loop.time()
 
-    if users_dirty:
-        save_json("users.json", {"users": users_cache})
-    if progress_dirty:
-        save_json("progress.json", {"users": progress_cache})
-    if audit_dirty:
-        save_json("audit_log.json", audit_cache)
-    await bot.session.close()
-
+        logging.info("Configured bot runtime reached; saving state before exit")
+    finally:
+        if keep_alive_task is not None:
+            keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except asyncio.CancelledError:
+                pass
+        save_offset(offset)
+        if users_dirty:
+            save_json("users.json", {"users": users_cache})
+        if progress_dirty:
+            save_json("progress.json", {"users": progress_cache})
+        if audit_dirty:
+            save_json("audit_log.json", audit_cache)
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
