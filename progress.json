@@ -24,7 +24,12 @@
       "subject": "القرآن",
       "streak": 1,
       "last_session": "2026-10-29T03:11:07.921661",
-      "exams": [],
+      "exams": [
+        {
+          "subject": "القرآن",
+          "days": 3
+        }
+      ],
       "completed_units": [],
       "quiz_history": []
     },
