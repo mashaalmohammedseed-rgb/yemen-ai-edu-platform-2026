@@ -96,6 +96,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "8515321414": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": "الإنجليزي",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
