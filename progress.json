@@ -60,6 +60,30 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "8240288176": {
+      "onboarding_done": false,
+      "situation": "start",
+      "curriculum": "sanaa",
+      "stream": "scientific",
+      "subject": null,
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
+    },
+    "5280981241": {
+      "onboarding_done": false,
+      "situation": "regular",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": null,
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
