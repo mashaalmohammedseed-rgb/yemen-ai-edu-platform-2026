@@ -17,13 +17,13 @@
       "quiz_history": []
     },
     "5117740235": {
-      "onboarding_done": true,
-      "situation": "backlog",
+      "onboarding_done": false,
+      "situation": "regular",
       "curriculum": "sanaa",
       "stream": "scientific",
-      "subject": "القرآن",
+      "subject": "الإنجليزي",
       "streak": 1,
-      "last_session": "2026-10-29T03:43:57.467238",
+      "last_session": "2026-10-29T03:46:51.650034",
       "exams": [
         {
           "subject": "القرآن",
