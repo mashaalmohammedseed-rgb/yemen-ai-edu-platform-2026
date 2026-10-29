@@ -27,6 +27,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "1593880276": {
+      "onboarding_done": true,
+      "situation": "regular",
+      "curriculum": "sanaa",
+      "stream": "scientific",
+      "subject": "الإنجليزي",
+      "streak": 1,
+      "last_session": "2026-10-29T03:05:03.634961",
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
