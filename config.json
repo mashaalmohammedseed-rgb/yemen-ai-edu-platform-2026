@@ -1,6 +1,15 @@
 {
   "owner_id": 5117740235,
-  "admins": {},
+  "admins": {
+    "7254512697": {
+      "name": "ᯓ 𓆩R𝙰𝙶𝙽𝙰𝚁 A𝙻𝙱𝚞𝚁𝙰𝙸𝙷𝙸𓆪 🇮??,࿅Tr.d.r",
+      "permissions": [
+        "view_stats"
+      ],
+      "added_at": "2026-10-29T02:54:06.472984",
+      "added_by": 5117740235
+    }
+  },
   "force_subscription": {
     "enabled": false,
     "channels": [],
@@ -15,13 +24,48 @@
   "main_menu": {
     "buttons_per_row": 2,
     "buttons": [
-      {"id": "p1", "text": "📖 أفهم مادة", "type": "callback", "value": "pathway_understand", "enabled": true},
-      {"id": "p2", "text": "🎯 أتدرب", "type": "callback", "value": "pathway_train", "enabled": true},
-      {"id": "p3", "text": "🔁 أراجع", "type": "callback", "value": "pathway_review", "enabled": true},
-      {"id": "p4", "text": "🔥 وضع الطوارئ", "type": "callback", "value": "emergency", "enabled": true},
-      {"id": "p5", "text": "📊 تقدمي", "type": "callback", "value": "my_progress", "enabled": true},
-      {"id": "p6", "text": "⚙️ إعداداتي", "type": "callback", "value": "my_settings", "enabled": true}
+      {
+        "id": "p1",
+        "text": "📖 أفهم مادة",
+        "type": "callback",
+        "value": "pathway_understand",
+        "enabled": true
+      },
+      {
+        "id": "p2",
+        "text": "🎯 أتدرب",
+        "type": "callback",
+        "value": "pathway_train",
+        "enabled": true
+      },
+      {
+        "id": "p3",
+        "text": "🔁 أراجع",
+        "type": "callback",
+        "value": "pathway_review",
+        "enabled": true
+      },
+      {
+        "id": "p4",
+        "text": "🔥 وضع الطوارئ",
+        "type": "callback",
+        "value": "emergency",
+        "enabled": true
+      },
+      {
+        "id": "p5",
+        "text": "📊 تقدمي",
+        "type": "callback",
+        "value": "my_progress",
+        "enabled": true
+      },
+      {
+        "id": "p6",
+        "text": "⚙️ إعداداتي",
+        "type": "callback",
+        "value": "my_settings",
+        "enabled": true
+      }
     ]
   }
 }
-
