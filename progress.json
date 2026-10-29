@@ -18,12 +18,12 @@
     },
     "5117740235": {
       "onboarding_done": true,
-      "situation": "emergency",
+      "situation": "backlog",
       "curriculum": "sanaa",
       "stream": "scientific",
-      "subject": "الرياضيات",
+      "subject": "القرآن",
       "streak": 1,
-      "last_session": "2026-10-29T02:55:22.635688",
+      "last_session": "2026-10-29T03:11:07.921661",
       "exams": [],
       "completed_units": [],
       "quiz_history": []
