@@ -168,6 +168,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "6827976550": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "sanaa",
+      "stream": "scientific",
+      "subject": "الأحياء",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
