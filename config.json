@@ -1,0 +1,27 @@
+{
+  "owner_id": 5117740235,
+  "admins": {},
+  "force_subscription": {
+    "enabled": false,
+    "channels": [],
+    "message": "⚠️ للاستفادة من البوت، اشترك في القنوات التالية:"
+  },
+  "notifications": {
+    "enabled": true,
+    "on_new_user": true,
+    "on_new_subscriber": true,
+    "on_message": false
+  },
+  "main_menu": {
+    "buttons_per_row": 2,
+    "buttons": [
+      {"id": "p1", "text": "📖 أفهم مادة", "type": "callback", "value": "pathway_understand", "enabled": true},
+      {"id": "p2", "text": "🎯 أتدرب", "type": "callback", "value": "pathway_train", "enabled": true},
+      {"id": "p3", "text": "🔁 أراجع", "type": "callback", "value": "pathway_review", "enabled": true},
+      {"id": "p4", "text": "🔥 وضع الطوارئ", "type": "callback", "value": "emergency", "enabled": true},
+      {"id": "p5", "text": "📊 تقدمي", "type": "callback", "value": "my_progress", "enabled": true},
+      {"id": "p6", "text": "⚙️ إعداداتي", "type": "callback", "value": "my_settings", "enabled": true}
+    ]
+  }
+}
+
