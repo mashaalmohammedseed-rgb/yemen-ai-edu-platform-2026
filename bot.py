@@ -159,10 +159,22 @@ def get_curriculum_ar(uid):
 
 
 def get_user_model(uid):
+    progress = get_progress(uid)
+    situation_ar = {
+        "emergency": "لديه امتحان قريب",
+        "backlog": "لديه منهج متراكم",
+        "start": "بدأ الفصل للتو",
+        "regular": "يداوم على المذاكرة بانتظام",
+    }.get(progress.get("situation"), "غير محدد")
+    stream_ar = {"scientific": "علمي", "literary": "أدبي"}.get(
+        progress.get("stream"), "غير محدد")
     return genai.GenerativeModel(
         model_name=AI_MODEL_NAME,
         system_instruction=content.AI_SYSTEM_PROMPT.format(
-            curriculum_ar=get_curriculum_ar(uid))
+            curriculum_ar=get_curriculum_ar(uid),
+            stream_ar=stream_ar,
+            subject_ar=progress.get("subject") or "غير محددة",
+            situation_ar=situation_ar)
     )
 
 
@@ -353,12 +365,16 @@ def emergency_subjects_kb(stream):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def short_answer_menu(msg_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
+def short_answer_menu(msg_id, show_more=True):
+    rows = []
+    if show_more:
+        rows.append([InlineKeyboardButton(
+            text="📖 تفاصيل أكثر", callback_data=f"sa_more_{msg_id}")])
+    rows.extend([
         [InlineKeyboardButton(text="✅ فهمت", callback_data=f"sa_ok_{msg_id}")],
-        [InlineKeyboardButton(text="📖 تفاصيل أكثر", callback_data=f"sa_more_{msg_id}")],
         [InlineKeyboardButton(text="❓ سؤال آخر", callback_data="sa_new")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def chat_with_ai(message):
@@ -374,21 +390,30 @@ async def chat_with_ai(message):
         full = response.text
         trim_chat_history(session)
         lines = full.split("\n")
-        short = "\n".join(lines[:4])
-        if len(short) > 350:
-            short = short[:347] + "..."
+        short = "\n".join(lines[:8]).strip()
+        if len(short) > 1200:
+            short = short[:1197].rstrip() + "..."
+        truncated = short != full.strip()
+        display_text = short
+        plain_text = short
+        if truncated:
+            display_text += "\n\n_... (اضغط «تفاصيل أكثر» لعرض الرد كاملاً)_"
+            plain_text += "\n\n... (اضغط زر تفاصيل أكثر لعرض الرد كاملاً)"
         try:
             sent = await bot.send_message(
-                message.chat.id, short + "\n\n_... (رد مختصر)_",
-                parse_mode="Markdown", reply_markup=short_answer_menu(0))
+                message.chat.id, display_text,
+                parse_mode="Markdown",
+                reply_markup=short_answer_menu(0, show_more=truncated))
         except Exception as markdown_error:
             logging.warning(f"Markdown chat response failed; retrying as plain text: {markdown_error}")
             sent = await bot.send_message(
-                message.chat.id, short + "\n\n... (رد مختصر)",
-                reply_markup=short_answer_menu(0))
-        short_answers_cache[sent.message_id] = full
+                message.chat.id, plain_text,
+                reply_markup=short_answer_menu(0, show_more=truncated))
+        if truncated:
+            short_answers_cache[sent.message_id] = full
         await bot.edit_message_reply_markup(message.chat.id, sent.message_id,
-                                            reply_markup=short_answer_menu(sent.message_id))
+                                            reply_markup=short_answer_menu(
+                                                sent.message_id, show_more=truncated))
     except Exception as e:
         chat_sessions.pop(uid, None)
         error_detail = safe_technical_error(e)
