@@ -17,11 +17,11 @@
       "quiz_history": []
     },
     "5117740235": {
-      "onboarding_done": false,
-      "situation": "start",
+      "onboarding_done": true,
+      "situation": "regular",
       "curriculum": "sanaa",
       "stream": "scientific",
-      "subject": "القرآن",
+      "subject": "الإسلامية",
       "streak": 1,
       "last_session": "2026-10-29T16:03:59.283585",
       "exams": [
@@ -31,6 +31,10 @@
         },
         {
           "subject": "القرآن",
+          "days": 3
+        },
+        {
+          "subject": "الإسلامية",
           "days": 3
         }
       ],
