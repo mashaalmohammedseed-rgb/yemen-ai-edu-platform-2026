@@ -240,6 +240,18 @@
       "exams": [],
       "completed_units": [],
       "quiz_history": []
+    },
+    "8413066789": {
+      "onboarding_done": false,
+      "situation": null,
+      "curriculum": null,
+      "stream": null,
+      "subject": null,
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
     }
   }
 }
