@@ -242,11 +242,23 @@
       "quiz_history": []
     },
     "8413066789": {
-      "onboarding_done": false,
-      "situation": null,
-      "curriculum": null,
-      "stream": null,
-      "subject": null,
+      "onboarding_done": true,
+      "situation": "regular",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": "الرياضيات",
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
+    },
+    "8082167161": {
+      "onboarding_done": true,
+      "situation": "backlog",
+      "curriculum": "sanaa",
+      "stream": "scientific",
+      "subject": "الكيمياء",
       "streak": 0,
       "last_session": null,
       "exams": [],
