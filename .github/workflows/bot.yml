@@ -1,8 +1,6 @@
 name: Run Telegram Bot
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -36,4 +34,3 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python bot.py
-
