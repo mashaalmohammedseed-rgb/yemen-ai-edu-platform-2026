@@ -20,7 +20,8 @@ MAX_RUNTIME = 5.75 * 3600  # 345 minutes; keep a 10-minute buffer under the 355-
 KEEP_ALIVE_INTERVAL = 300
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-AI_MODEL_NAME = "gemini-1.5-flash"
+AI_MODEL_NAME = "gemini-3.8-flash"
+CHAT_HISTORY_LIMIT = 6
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -163,6 +164,20 @@ def get_user_model(uid):
         system_instruction=content.AI_SYSTEM_PROMPT.format(
             curriculum_ar=get_curriculum_ar(uid))
     )
+
+
+def trim_chat_history(session):
+    history = session.history
+    if len(history) > CHAT_HISTORY_LIMIT:
+        session.history = history[-CHAT_HISTORY_LIMIT:]
+
+
+def safe_technical_error(error):
+    detail = str(error).replace("\n", " ").strip()
+    for secret in (os.getenv("GEMINI_API_KEY"), TELEGRAM_TOKEN, GITHUB_TOKEN):
+        if secret:
+            detail = detail.replace(secret, "[REDACTED]")
+    return detail or type(error).__name__
 
 
 def update_progress(uid, **kwargs):
@@ -354,8 +369,10 @@ async def chat_with_ai(message):
         if not session:
             session = get_user_model(uid).start_chat(history=[])
             chat_sessions[uid] = session
+        trim_chat_history(session)
         response = await session.send_message_async(message.text)
         full = response.text
+        trim_chat_history(session)
         lines = full.split("\n")
         short = "\n".join(lines[:4])
         if len(short) > 350:
@@ -373,8 +390,12 @@ async def chat_with_ai(message):
         await bot.edit_message_reply_markup(message.chat.id, sent.message_id,
                                             reply_markup=short_answer_menu(sent.message_id))
     except Exception as e:
-        logging.error(f"chat: {e}")
-        await bot.send_message(message.chat.id, "⚠️ حدث خطأ. حاول مرة أخرى.", reply_markup=chat_menu())
+        chat_sessions.pop(uid, None)
+        error_detail = safe_technical_error(e)
+        logging.error(f"Gemini API Error: {error_detail}")
+        await bot.send_message(
+            message.chat.id, f"⚠️ خطأ تقني: {error_detail[:100]}",
+            reply_markup=chat_menu())
 
 
 async def show_emergency_plan(cb, subject):
