@@ -15,6 +15,7 @@ from datetime import datetime
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import google.generativeai as genai
+from google.api_core import exceptions as google_api_exceptions
 import content
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -26,6 +27,16 @@ KEEP_ALIVE_INTERVAL = 300
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 AI_MODEL_NAME = "gemini-3.8-flash"
 CHAT_HISTORY_LIMIT = 6
+GEMINI_TIMEOUT_ERRORS = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    google_api_exceptions.DeadlineExceeded,
+    google_api_exceptions.GatewayTimeout,
+    google_api_exceptions.RetryError,
+    google_api_exceptions.ServiceUnavailable,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -630,10 +641,24 @@ async def answer_long_text(message, text, reply_markup=None, parse_mode="Markdow
         parse_mode=parse_mode)
 
 
+async def maintain_typing(chat_id):
+    while True:
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action="typing")
+        except asyncio.CancelledError:
+            raise
+        except Exception as typing_error:
+            logging.warning("Typing indicator refresh failed (%s)",
+                            type(typing_error).__name__)
+        await asyncio.sleep(4)
+
+
 async def chat_with_ai(message):
     uid = message.from_user.id
+    typing_task = None
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        typing_task = asyncio.create_task(maintain_typing(message.chat.id))
         chat_text = message.text
         wikipedia_url = ""
         wiki_query = wikipedia_query_from_question(message.text)
@@ -658,9 +683,7 @@ async def chat_with_ai(message):
             session = get_user_model(uid).start_chat(history=[])
             chat_sessions[uid] = session
         trim_chat_history(session)
-        response = await asyncio.wait_for(
-            session.send_message_async(chat_text, request_options={"timeout": 60}),
-            timeout=60)
+        response = await session.send_message_async(chat_text)
         full = clean_text(response.text)
         if wikipedia_url:
             full += f"\n\n📚 المصدر:\n{wikipedia_url}"
@@ -686,20 +709,29 @@ async def chat_with_ai(message):
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id, message_id=sent.message_id,
             reply_markup=short_answer_menu(sent.message_id, show_more=truncated))
-    except asyncio.TimeoutError:
+    except GEMINI_TIMEOUT_ERRORS as e:
         chat_sessions.pop(uid, None)
-        logging.warning("Gemini generation exceeded the 60-second timeout for user %s", uid)
+        logging.error("Gemini connection timed out for user %s: %s",
+                      uid, safe_technical_error(e), exc_info=True)
         await send_safe_text(
             chat_id=message.chat.id,
-            text="⚠️ عذراً، استغرق توليد الإجابة وقتاً طويلاً. حاول مرة أخرى.",
+            text="⚠️ عذراً، استغرق توليد الإجابة وقتاً طويلاً بسبب ضغط على الخوادم. يرجى المحاولة مرة أخرى.",
             reply_markup=chat_menu(), parse_mode=None)
     except Exception as e:
         chat_sessions.pop(uid, None)
         error_detail = safe_technical_error(e)
-        logging.error(f"Gemini API Error: {error_detail}")
+        logging.error("Gemini API Error: %s", error_detail, exc_info=True)
         await send_safe_text(
             chat_id=message.chat.id,
-            text=f"⚠️ خطأ تقني: {error_detail[:100]}", reply_markup=chat_menu())
+            text="⚠️ حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.",
+            reply_markup=chat_menu(), parse_mode=None)
+    finally:
+        if typing_task is not None:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
 
 
 async def show_emergency_plan(cb, subject):
