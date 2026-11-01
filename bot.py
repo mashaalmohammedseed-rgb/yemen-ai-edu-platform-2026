@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import copy
+import html
 import logging
 import os
 import json
@@ -14,6 +15,9 @@ import requests
 from datetime import datetime
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
+from aiogram.methods import SendMessage, EditMessageText
 import google.generativeai as genai
 from google.api_core import exceptions as google_api_exceptions
 import content
@@ -39,7 +43,7 @@ GEMINI_TIMEOUT_ERRORS = (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-bot = Bot(token=TELEGRAM_TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
 PERMISSIONS = {
     "view_stats": "📊 الإحصائيات",
@@ -170,8 +174,7 @@ def has_perm(uid, perm):
 
 
 def user_mention(uid, name):
-    safe = name.replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
-    return f'<a href="tg://user?id={uid}">{safe}</a>'
+    return f'<a href="tg://user?id={uid}">{name or ""}</a>'
 
 
 def register_user(msg):
@@ -586,6 +589,14 @@ def clean_text(text):
     cleaned = cleaned.replace("`", "")
     cleaned = re.sub(r"\*{2,}([^*\n]+?)\*{2,}", r"*\1*", cleaned)
     cleaned = re.sub(r"\*{2,}", "", cleaned)
+    heading_pattern = re.compile(
+        r"(?m)^([ \t]*)(مقدمة|أولاً|أولًا|أولا|ثانياً|ثانيًا|ثانيا|خاتمة)[ \t]*:[ \t]*(.*)$"
+    )
+    cleaned = heading_pattern.sub(
+        lambda match: f"{match.group(1)}<b>{match.group(2)}:</b>"
+        + (f" {match.group(3)}" if match.group(3) else ""),
+        cleaned,
+    )
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -601,11 +612,66 @@ def plain_text_from_markdown(text):
     plain = re.sub(r"(?<!\w)\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?!\w)", r"\1", plain)
     plain = re.sub(r"(?<!\w)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)", r"\1", plain)
     plain = re.sub(r"\[(.*?)\]\((https?://[^)\s]+)\)", r"\1 (\2)", plain)
+    plain = re.sub(r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler|a)\b[^>]*>", "", plain, flags=re.IGNORECASE)
+    plain = html.unescape(plain)
     plain = re.sub(r"(?<=\w)[ \t]*\*[ \t]*(?=\w)", " × ", plain).replace("*", "")
     plain = re.sub(r"[ \t]{2,}", " ", plain)
     plain = re.sub(r" *\n *", "\n", plain)
     plain = re.sub(r"\n{3,}", "\n\n", plain)
     return plain.strip()
+
+
+_SAFE_HTML_TAG = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler|a)>"
+    r"|<a\s+href=\"(?:https?://|tg://|mailto:)[^\"]*\">",
+    re.IGNORECASE,
+)
+
+
+def markdown_to_html(text):
+    """Convert legacy Telegram Markdown and plain text to safe Telegram HTML."""
+    prepared = clean_text(text)
+    preserved_tags = []
+
+    def preserve_tag(match):
+        preserved_tags.append(match.group(0))
+        return f"\x00SAFEHTML{len(preserved_tags) - 1}\x00"
+
+    prepared = _SAFE_HTML_TAG.sub(preserve_tag, prepared)
+    prepared = html.escape(prepared, quote=False)
+    prepared = re.sub(
+        r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
+        lambda match: f'<a href="{match.group(2)}">{match.group(1)}</a>',
+        prepared,
+    )
+    prepared = re.sub(r"\*\*([^*\n]+?)\*\*", r"<b>\1</b>", prepared)
+    prepared = re.sub(
+        r"(?<!\w)\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?!\w)",
+        r"<b>\1</b>",
+        prepared,
+    )
+    prepared = re.sub(
+        r"(?<!\w)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)",
+        r"<i>\1</i>",
+        prepared,
+    )
+    for index, tag in enumerate(preserved_tags):
+        prepared = prepared.replace(f"\x00SAFEHTML{index}\x00", tag)
+    return prepared
+
+
+class TelegramHTMLMiddleware(BaseRequestMiddleware):
+    async def __call__(self, make_request, bot_instance, method):
+        if isinstance(method, (SendMessage, EditMessageText)):
+            if method.parse_mode is None:
+                method.text = plain_text_from_markdown(method.text)
+            else:
+                method.text = markdown_to_html(method.text)
+                method.parse_mode = "HTML"
+        return await make_request(bot_instance, method)
+
+
+bot.session.middleware(TelegramHTMLMiddleware())
 
 
 def split_telegram_text(text, limit=3900):
@@ -634,14 +700,12 @@ def split_telegram_text(text, limit=3900):
     return chunks
 
 
-async def send_safe_text(chat_id, text, reply_markup=None, parse_mode="Markdown",
+async def send_safe_text(chat_id, text, reply_markup=None, parse_mode="HTML",
                          disable_web_page_preview=None):
     chunks = split_telegram_text(text)
     sent = None
     for index, chunk in enumerate(chunks):
-        params = {"chat_id": chat_id, "text": chunk}
-        if parse_mode:
-            params["parse_mode"] = parse_mode
+        params = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
         if index == len(chunks) - 1 and reply_markup is not None:
             params["reply_markup"] = reply_markup
         if disable_web_page_preview is not None:
@@ -653,16 +717,30 @@ async def send_safe_text(chat_id, text, reply_markup=None, parse_mode="Markdown"
                 raise
             logging.warning("Formatted Telegram send failed (%s); retrying as plain text",
                             type(send_error).__name__)
-            params.pop("parse_mode", None)
+            params["parse_mode"] = None
             params["text"] = plain_text_from_markdown(chunk)
             sent = await bot.send_message(**params)
     return sent
 
 
-async def answer_long_text(message, text, reply_markup=None, parse_mode="Markdown"):
+async def answer_long_text(message, text, reply_markup=None, parse_mode="HTML"):
     return await send_safe_text(
         chat_id=message.chat.id, text=text, reply_markup=reply_markup,
         parse_mode=parse_mode)
+
+
+async def edit_long_text_or_send_plain(message, text, reply_markup=None,
+                                       disable_web_page_preview=None):
+    try:
+        return await message.edit_text(
+            text=text, reply_markup=reply_markup, parse_mode="HTML",
+            disable_web_page_preview=disable_web_page_preview)
+    except Exception as edit_error:
+        logging.warning("Formatted callback edit failed (%s); sending plain fallback",
+                        type(edit_error).__name__)
+        return await message.answer(
+            text=plain_text_from_markdown(text), reply_markup=reply_markup,
+            parse_mode=None, disable_web_page_preview=disable_web_page_preview)
 
 
 async def maintain_typing(chat_id):
@@ -714,7 +792,7 @@ async def chat_with_ai(message):
         trim_chat_history(session)
         if len(full) > 4000:
             await send_safe_text(
-                chat_id=message.chat.id, text=full, parse_mode="Markdown",
+                chat_id=message.chat.id, text=full, parse_mode="HTML",
                 reply_markup=chat_menu())
             return
         lines = full.split("\n")
@@ -726,7 +804,7 @@ async def chat_with_ai(message):
         if truncated:
             display_text += "\n\n_... (اضغط «تفاصيل أكثر» لعرض الرد كاملاً)_"
         sent = await send_safe_text(
-            chat_id=message.chat.id, text=display_text, parse_mode="Markdown",
+            chat_id=message.chat.id, text=display_text, parse_mode="HTML",
             reply_markup=short_answer_menu(0, show_more=truncated))
         if truncated:
             short_answers_cache[sent.message_id] = full
@@ -769,7 +847,7 @@ async def show_emergency_plan(cb, subject):
         [InlineKeyboardButton(text="🔁 برومبت اليوم 3", callback_data=f"em_p3_{subject}")],
         [InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="home")],
     ])
-    await cb.message.edit_text(text=text, reply_markup=kb, parse_mode="Markdown")
+    await cb.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
     await cb.answer()
 
 
@@ -797,7 +875,7 @@ async def show_progress(cb):
         avg = sum(q.get("score", 0) for q in quizzes) / len(quizzes)
         text += f"*📈 متوسط درجاتك:* {avg:.1f}\n"
     text += f"\n💪 _{random.choice(content.ENCOURAGEMENTS)}_"
-    await cb.message.edit_text(text=text, reply_markup=back_menu(), parse_mode="Markdown")
+    await cb.message.edit_text(text=text, reply_markup=back_menu(), parse_mode="HTML")
     await cb.answer()
 
 
@@ -824,7 +902,7 @@ async def _handle_message(msg):
         txt = fs.get("message", "⚠️ اشترك في القنوات:") + "\n\n" + "\n".join(f"• {c}" for c in missing)
         kb = [[InlineKeyboardButton(text=f"📢 اشترك في {c}", url=f"https://t.me/{c.lstrip('@')}")] for c in missing]
         kb.append([InlineKeyboardButton(text="✅ تحقّق", callback_data="check_sub")])
-        await msg.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+        await msg.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
         return
 
     state = admin_state.get(uid)
@@ -838,13 +916,13 @@ async def _handle_message(msg):
         p = get_progress(uid)
         if p.get("onboarding_done") and not p.get("curriculum"):
             await msg.answer(content.ONBOARDING_CURRICULUM,
-                             reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
+                             reply_markup=onboarding_curriculum_kb(), parse_mode="HTML")
             return
         if not p.get("onboarding_done"):
             update_progress(uid, onboarding_done=False)
-            await msg.answer(content.ONBOARDING_WELCOME, parse_mode="Markdown")
+            await msg.answer(content.ONBOARDING_WELCOME, parse_mode="HTML")
             await msg.answer(content.ONBOARDING_SITUATION,
-                             reply_markup=onboarding_situations_kb(), parse_mode="Markdown")
+                             reply_markup=onboarding_situations_kb(), parse_mode="HTML")
             return
         streak = update_streak(uid)
         summary = f"• المادة: {p.get('subject', 'لم تحدد')}\n• الكويزات: {len(p.get('quiz_history', []))}"
@@ -853,14 +931,14 @@ async def _handle_message(msg):
             name=msg.from_user.first_name or "", progress_summary=summary,
             streak=streak, streak_badge=badge,
             next_action="استخدم الأزرار للبدء 👇"),
-            reply_markup=main_menu(), parse_mode="Markdown")
+            reply_markup=main_menu(), parse_mode="HTML")
         return
 
     if text == "/help":
         await msg.answer("📖 *أوامر:*\n/start — البداية\n/chat — دردشة\n/newchat — محادثة جديدة\n/exit — خروج\n"
                          "/progress — تقدمي\n🧮 حل مسألة — زر في القائمة الرئيسية\n"
                          "/admin — لوحة التحكم\n/help — مساعدة",
-                         parse_mode="Markdown")
+                         parse_mode="HTML")
         return
 
     if text == "/newchat":
@@ -874,7 +952,7 @@ async def _handle_message(msg):
         wolfram_mode[uid] = False
         chat_mode[uid] = True
         chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
-        await msg.answer(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
+        await msg.answer(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="HTML")
         return
 
     if text == "/exit":
@@ -882,7 +960,7 @@ async def _handle_message(msg):
         wolfram_mode[uid] = False
         chat_sessions.pop(uid, None)
         await msg.answer("✅ خرجت من الدردشة.\n\n" + random.choice(content.ENCOURAGEMENTS),
-                         reply_markup=main_menu(), parse_mode="Markdown")
+                         reply_markup=main_menu(), parse_mode="HTML")
         return
 
     if text == "/progress":
@@ -990,7 +1068,7 @@ async def _handle_callback(cb):
             situation = data.replace("onb_", "")
             update_progress(uid, situation=situation)
             await cb.message.edit_text(text=content.ONBOARDING_CURRICULUM,
-                                        reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
+                                        reply_markup=onboarding_curriculum_kb(), parse_mode="HTML")
         elif data in ("onb_curr_sanaa", "onb_curr_aden"):
             curriculum = "sanaa" if data == "onb_curr_sanaa" else "aden"
             p = get_progress(uid)
@@ -1000,16 +1078,16 @@ async def _handle_callback(cb):
                 curriculum_name = {"sanaa": "صنعاء", "aden": "عدن"}[curriculum]
                 await cb.message.edit_text(text=
                     f"✅ تم حفظ منهج مدرستك: *وزارة التربية ({curriculum_name})*.",
-                    reply_markup=main_menu(), parse_mode="Markdown")
+                    reply_markup=main_menu(), parse_mode="HTML")
             else:
                 await cb.message.edit_text(text=content.ONBOARDING_STREAM,
-                                            reply_markup=onboarding_streams_kb(), parse_mode="Markdown")
+                                            reply_markup=onboarding_streams_kb(), parse_mode="HTML")
         elif data in ("onb_sci", "onb_lit"):
             stream = "scientific" if data == "onb_sci" else "literary"
             update_progress(uid, stream=stream)
             await cb.message.edit_text(text=content.ONBOARDING_SUBJECT,
                                         reply_markup=onboarding_subjects_kb(stream),
-                                        parse_mode="Markdown")
+                                        parse_mode="HTML")
         elif data.startswith("onb_sub_"):
             subject = data.replace("onb_sub_", "")
             p = get_progress(uid)
@@ -1021,14 +1099,14 @@ async def _handle_callback(cb):
             text = content.ONBOARDING_DONE.format(
                 situation=situation_ar, curriculum=get_curriculum_ar(uid),
                 stream=stream_ar, subject=subject, next_step=next_step)
-            await cb.message.edit_text(text=text, reply_markup=main_menu(), parse_mode="Markdown")
+            await cb.message.edit_text(text=text, reply_markup=main_menu(), parse_mode="HTML")
 
         elif data == "home":
             chat_mode[uid] = False
             wolfram_mode[uid] = False
             chat_sessions.pop(uid, None)
             await cb.message.edit_text(text="🏠 *القائمة الرئيسية*",
-                                        reply_markup=main_menu(), parse_mode="Markdown")
+                                        reply_markup=main_menu(), parse_mode="HTML")
 
         elif data == "wolfram_start":
             chat_mode[uid] = False
@@ -1036,7 +1114,7 @@ async def _handle_callback(cb):
             wolfram_mode[uid] = True
             await cb.message.edit_text(text=
                 "🧮 *حل مسألة رياضية*\n\nأرسل المسألة أو المعادلة كنص، وسأطلب حلها من Wolfram|Alpha مع الخطوات المتاحة.",
-                reply_markup=back_menu(), parse_mode="Markdown")
+                reply_markup=back_menu(), parse_mode="HTML")
 
         elif data == "pathway_understand":
             kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1044,54 +1122,59 @@ async def _handle_callback(cb):
                 [InlineKeyboardButton(text="🧠 برومبت الشرح", callback_data="understand_prompt")],
                 [InlineKeyboardButton(text="🤖 دردشة مع AI", callback_data="chat_start")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(text=content.PATHWAY_UNDERSTAND, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_UNDERSTAND, reply_markup=kb, parse_mode="HTML")
         elif data == "pathway_train":
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎯 بنك نجاح", url="https://www.e-najah.net/QsBank/")],
                 [InlineKeyboardButton(text="❓ كويز DeepSeek", callback_data="quiz_prompt")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(text=content.PATHWAY_TRAIN, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_TRAIN, reply_markup=kb, parse_mode="HTML")
         elif data == "pathway_review":
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💊 نقاط ضعفي", callback_data="weakness_prompt")],
                 [InlineKeyboardButton(text="🔮 توقع أسئلة", callback_data="predict_prompt")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(text=content.PATHWAY_REVIEW, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_REVIEW, reply_markup=kb, parse_mode="HTML")
 
         elif data == "sources":
-            await cb.message.edit_text(text=content.SOURCES_TEXT, reply_markup=back_menu(),
-                                        parse_mode="Markdown", disable_web_page_preview=True)
+            await edit_long_text_or_send_plain(
+                cb.message, content.SOURCES_TEXT, reply_markup=back_menu(),
+                disable_web_page_preview=True)
         elif data == "understand_prompt":
             p = get_progress(uid)
             text = content.UNDERSTAND_PROMPT.format(
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text=text, reply_markup=back_menu(),
-                                        parse_mode="Markdown", disable_web_page_preview=True)
+            await edit_long_text_or_send_plain(
+                cb.message, text, reply_markup=back_menu(),
+                disable_web_page_preview=True)
         elif data == "quiz_prompt":
             p = get_progress(uid)
             text = content.QUIZ_PROMPT.format(
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text=text, reply_markup=back_menu(),
-                                        parse_mode="Markdown", disable_web_page_preview=True)
+            await edit_long_text_or_send_plain(
+                cb.message, text, reply_markup=back_menu(),
+                disable_web_page_preview=True)
         elif data == "weakness_prompt":
             p = get_progress(uid)
             text = content.WEAKNESS_PROMPT.format(
                 subject=p.get("subject", "[المادة]"), days=7,
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text=text, reply_markup=back_menu(),
-                                        parse_mode="Markdown", disable_web_page_preview=True)
+            await edit_long_text_or_send_plain(
+                cb.message, text, reply_markup=back_menu(),
+                disable_web_page_preview=True)
         elif data == "predict_prompt":
             p = get_progress(uid)
             text = content.PREDICT_PROMPT.format(
                 subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text=text, reply_markup=back_menu(),
-                                        parse_mode="Markdown", disable_web_page_preview=True)
+            await edit_long_text_or_send_plain(
+                cb.message, text, reply_markup=back_menu(),
+                disable_web_page_preview=True)
 
         elif data == "my_progress":
             await show_progress(cb)
@@ -1101,22 +1184,22 @@ async def _handle_callback(cb):
                 [InlineKeyboardButton(text="🌍 تغيير المنهج", callback_data="curriculum_reset")],
                 [InlineKeyboardButton(text="📊 تقدمي", callback_data="my_progress")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(text="⚙️ *إعداداتي*\n\nاختر:", reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text="⚙️ *إعداداتي*\n\nاختر:", reply_markup=kb, parse_mode="HTML")
         elif data == "curriculum_reset":
             await cb.message.edit_text(text=content.ONBOARDING_CURRICULUM,
-                                        reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
+                                        reply_markup=onboarding_curriculum_kb(), parse_mode="HTML")
         elif data == "onb_stream_reset":
             update_progress(uid, onboarding_done=False)
             await cb.message.edit_text(text=content.ONBOARDING_SITUATION,
                                         reply_markup=onboarding_situations_kb(),
-                                        parse_mode="Markdown")
+                                        parse_mode="HTML")
 
         elif data == "emergency":
             p = get_progress(uid)
             stream = p.get("stream", "scientific") or "scientific"
             await cb.message.edit_text(text=content.EMERGENCY_START,
                                         reply_markup=emergency_subjects_kb(stream),
-                                        parse_mode="Markdown")
+                                        parse_mode="HTML")
 
         elif data.startswith("em_sub_"):
             subject = data.replace("em_sub_", "")
@@ -1128,24 +1211,30 @@ async def _handle_callback(cb):
             prompt = content.EMERGENCY_DAY1_PROMPT.format(
                 subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 days=3, curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.answer(f"📖 *برومبت اليوم 1 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
-                                    parse_mode="Markdown")
+            await send_safe_text(
+                chat_id=cb.message.chat.id,
+                text=f"📖 *برومبت اليوم 1 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
+                parse_mode="HTML")
         elif data.startswith("em_p2_"):
             subject = data.replace("em_p2_", "")
             p = get_progress(uid)
             prompt = content.EMERGENCY_DAY2_PROMPT.format(
                 subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 days=3, curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.answer(f"🎯 *برومبت اليوم 2 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
-                                    parse_mode="Markdown")
+            await send_safe_text(
+                chat_id=cb.message.chat.id,
+                text=f"🎯 *برومبت اليوم 2 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
+                parse_mode="HTML")
         elif data.startswith("em_p3_"):
             subject = data.replace("em_p3_", "")
             p = get_progress(uid)
             prompt = content.EMERGENCY_DAY3_PROMPT.format(
                 subject=subject, stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 days=3, curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.answer(f"🔁 *برومبت اليوم 3 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
-                                    parse_mode="Markdown")
+            await send_safe_text(
+                chat_id=cb.message.chat.id,
+                text=f"🔁 *برومبت اليوم 3 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
+                parse_mode="HTML")
 
         elif data == "chat_new":
             wolfram_mode[uid] = False
@@ -1157,7 +1246,7 @@ async def _handle_callback(cb):
             wolfram_mode[uid] = False
             chat_mode[uid] = True
             chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
-            await cb.message.edit_text(text=content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
+            await cb.message.edit_text(text=content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="HTML")
         elif data == "chat_exit":
             chat_mode[uid] = False
             wolfram_mode[uid] = False
@@ -1165,13 +1254,13 @@ async def _handle_callback(cb):
             streak = update_streak(uid)
             await cb.message.edit_text(text=
                 f"✅ خرجت من الدردشة.\n\n🔥 سلسلة: {streak}\n\n{random.choice(content.ENCOURAGEMENTS)}",
-                reply_markup=main_menu(), parse_mode="Markdown")
+                reply_markup=main_menu(), parse_mode="HTML")
 
         elif data.startswith("sa_more_"):
             msg_id = int(data.replace("sa_more_", ""))
             full = short_answers_cache.get(msg_id)
             if full:
-                await answer_long_text(cb.message, full, parse_mode="Markdown")
+                await answer_long_text(cb.message, full, parse_mode="HTML")
             else:
                 await cb.answer("الرد لم يعد متاحاً، اسأل من جديد.", show_alert=True)
         elif data.startswith("sa_ok_"):
@@ -1210,7 +1299,7 @@ async def _handle_callback(cb):
             btn_id = data.replace("prompt_", "")
             for b in get_all_buttons():
                 if b["id"] == btn_id and b.get("type") == "prompt":
-                    await cb.message.answer(f"📋 *{b['text']}*\n\n`{b['value']}`", parse_mode="Markdown")
+                    await cb.message.answer(f"📋 *{b['text']}*\n\n`{b['value']}`", parse_mode="HTML")
                     break
 
         await cb.answer()
@@ -1236,7 +1325,7 @@ async def show_admin_panel(msg):
     if has_perm(uid, "manage_admins"):
         kb.append([InlineKeyboardButton(text="👤 إدارة الأدمن", callback_data="admin_manage")])
     await msg.answer(f"🛠️ *لوحة التحكم*\n\nدورك: {role}",
-                     reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
 
 async def handle_chat_member(update):
