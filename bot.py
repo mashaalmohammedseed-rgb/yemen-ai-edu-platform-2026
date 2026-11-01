@@ -1,11 +1,15 @@
 
 # -*- coding: utf-8 -*-
 import asyncio
+import copy
 import logging
 import os
 import json
 import base64
 import random
+import re
+import threading
+from collections import defaultdict, deque
 import requests
 from datetime import datetime
 from aiogram import Bot, types
@@ -41,6 +45,9 @@ DEFAULT_ADMIN_PERMS = ["view_stats"]
 chat_mode, chat_sessions, admin_state, pending_buttons = {}, {}, {}, {}
 wolfram_mode = {}
 short_answers_cache = {}
+user_locks = defaultdict(asyncio.Lock)
+github_write_lock = threading.Lock()
+config_save_lock = asyncio.Lock()
 
 users_cache, users_dirty = {}, False
 progress_cache, progress_dirty = {}, False
@@ -65,18 +72,23 @@ def load_config():
 
 def save_config(cfg):
     try:
-        r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
-                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
-        sha = r.json().get("sha") if r.status_code == 200 else None
-        data = {"message": f"config {datetime.utcnow().isoformat()}",
-                "content": base64.b64encode(
-                    json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")).decode()}
-        if sha:
-            data["sha"] = sha
-        requests.put(f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
-                     headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=data, timeout=10)
+        with github_write_lock:
+            r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
+                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+            sha = r.json().get("sha") if r.status_code == 200 else None
+            data = {"message": f"config {datetime.utcnow().isoformat()}",
+                    "content": base64.b64encode(
+                        json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")).decode()}
+            if sha:
+                data["sha"] = sha
+            response = requests.put(
+                f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
+                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=data, timeout=10)
+            response.raise_for_status()
+            return True
     except Exception as e:
         logging.error(f"save_config: {e}")
+        return False
 
 
 def load_json(filename, default):
@@ -92,21 +104,39 @@ def load_json(filename, default):
 
 def save_json(filename, data):
     try:
-        r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
-        sha = r.json().get("sha") if r.status_code == 200 else None
-        payload = {"message": f"update {filename} {datetime.utcnow().isoformat()}",
-                   "content": base64.b64encode(
-                       json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")).decode()}
-        if sha:
-            payload["sha"] = sha
-        requests.put(f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-                     headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=payload, timeout=10)
+        with github_write_lock:
+            r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
+                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+            sha = r.json().get("sha") if r.status_code == 200 else None
+            payload = {"message": f"update {filename} {datetime.utcnow().isoformat()}",
+                       "content": base64.b64encode(
+                           json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")).decode()}
+            if sha:
+                payload["sha"] = sha
+            response = requests.put(
+                f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
+                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=payload, timeout=10)
+            response.raise_for_status()
+            return True
     except Exception as e:
         logging.error(f"save {filename}: {e}")
+        return False
 
 
-CONFIG = load_config()
+CONFIG = {
+    "owner_id": 5117740235,
+    "admins": {},
+    "force_subscription": {"enabled": False, "channels": [], "message": ""},
+    "notifications": {"enabled": True, "on_new_user": True,
+                      "on_new_subscriber": True, "on_message": False},
+    "main_menu": {"buttons_per_row": 2, "buttons": []},
+}
+
+
+async def persist_config():
+    async with config_save_lock:
+        snapshot = copy.deepcopy(CONFIG)
+        return await asyncio.to_thread(save_config, snapshot)
 
 
 def get_offset():
@@ -115,7 +145,7 @@ def get_offset():
 
 
 def save_offset(offset):
-    save_json("offset.json", {"offset": offset})
+    return save_json("offset.json", {"offset": offset})
 
 
 def is_owner(uid):
@@ -187,7 +217,8 @@ def trim_chat_history(session):
 
 def safe_technical_error(error):
     detail = str(error).replace("\n", " ").strip()
-    for secret in (os.getenv("GEMINI_API_KEY"), TELEGRAM_TOKEN, GITHUB_TOKEN):
+    for secret in (os.getenv("GEMINI_API_KEY"), os.getenv("WOLFRAM_APPID"),
+                   TELEGRAM_TOKEN, GITHUB_TOKEN):
         if secret:
             detail = detail.replace(secret, "[REDACTED]")
     return detail or type(error).__name__
@@ -496,13 +527,42 @@ def wikipedia_summary_sync(query):
     return extract[:5000], page.get("fullurl", "")
 
 
+def clean_text(text):
+    cleaned = str(text or "")
+    for delimiter in (r"\[", r"\]", r"\(", r"\)", "$$"):
+        cleaned = cleaned.replace(delimiter, "")
+    fraction_pattern = re.compile(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+    while True:
+        updated = fraction_pattern.sub(r"\1/\2", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated
+    cleaned = re.sub(r"\^\s*\{2\}|\^2(?!\d)", "²", cleaned)
+    cleaned = re.sub(r"\^\s*\{3\}|\^3(?!\d)", "³", cleaned)
+    cleaned = cleaned.replace(r"\times", "×").replace(r"\div", "÷")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def split_telegram_text(text, limit=3900):
-    remaining = (text or "").strip()
+    remaining = clean_text(text)
     chunks = []
     while len(remaining) > limit:
         cut = remaining.rfind("\n", 0, limit)
         if cut <= 0:
-            cut = remaining.rfind(" ", 0, limit)
+            safe_breaks = [match.start() for match in re.finditer(r"\s+", remaining[:limit])
+                           if match.start() > 0
+                           and remaining[match.start() - 1] not in "=+-*/^×÷"
+                           and (match.end() >= len(remaining)
+                                or remaining[match.end()] not in "=+-*/^×÷")]
+            cut = safe_breaks[-1] if safe_breaks else -1
+        if cut <= 0:
+            operator_positions = [remaining.rfind(op, 0, limit)
+                                  for op in (" = ", " + ", " - ", " × ", " ÷ ", " / ", " * ")]
+            operator_cut = max(operator_positions)
+            cut = operator_cut + 1 if operator_cut > 0 else -1
         if cut <= 0:
             cut = limit
         chunks.append(remaining[:cut].rstrip())
@@ -512,22 +572,34 @@ def split_telegram_text(text, limit=3900):
     return chunks
 
 
-async def answer_long_text(message, text, reply_markup=None, parse_mode=None):
+async def send_safe_text(chat_id, text, reply_markup=None, parse_mode="Markdown",
+                         disable_web_page_preview=None):
     chunks = split_telegram_text(text)
-    last_message = None
+    sent = None
     for index, chunk in enumerate(chunks):
-        markup = reply_markup if index == len(chunks) - 1 else None
+        params = {"chat_id": chat_id, "text": chunk}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        if index == len(chunks) - 1 and reply_markup is not None:
+            params["reply_markup"] = reply_markup
+        if disable_web_page_preview is not None:
+            params["disable_web_page_preview"] = disable_web_page_preview
         try:
-            if parse_mode:
-                last_message = await message.answer(
-                    chunk, parse_mode=parse_mode, reply_markup=markup)
-            else:
-                last_message = await message.answer(chunk, reply_markup=markup)
-        except Exception:
+            sent = await bot.send_message(**params)
+        except Exception as send_error:
             if not parse_mode:
                 raise
-            last_message = await message.answer(chunk, reply_markup=markup)
-    return last_message
+            logging.warning("Formatted Telegram send failed (%s); retrying as plain text",
+                            type(send_error).__name__)
+            params.pop("parse_mode", None)
+            sent = await bot.send_message(**params)
+    return sent
+
+
+async def answer_long_text(message, text, reply_markup=None, parse_mode="Markdown"):
+    return await send_safe_text(
+        chat_id=message.chat.id, text=text, reply_markup=reply_markup,
+        parse_mode=parse_mode)
 
 
 async def chat_with_ai(message):
@@ -559,42 +631,38 @@ async def chat_with_ai(message):
             chat_sessions[uid] = session
         trim_chat_history(session)
         response = await session.send_message_async(chat_text)
-        full = response.text
+        full = clean_text(response.text)
         if wikipedia_url:
-            full += f"\n\n📚 المصدر: {wikipedia_url}"
+            full += f"\n\n📚 المصدر:\n{wikipedia_url}"
         trim_chat_history(session)
+        if len(full) > 4000:
+            await send_safe_text(
+                chat_id=message.chat.id, text=full, parse_mode="Markdown",
+                reply_markup=chat_menu())
+            return
         lines = full.split("\n")
         short = "\n".join(lines[:8]).strip()
         if len(short) > 1200:
             short = short[:1197].rstrip() + "..."
         truncated = short != full.strip()
         display_text = short
-        plain_text = short
         if truncated:
             display_text += "\n\n_... (اضغط «تفاصيل أكثر» لعرض الرد كاملاً)_"
-            plain_text += "\n\n... (اضغط زر تفاصيل أكثر لعرض الرد كاملاً)"
-        try:
-            sent = await bot.send_message(
-                message.chat.id, display_text,
-                parse_mode="Markdown",
-                reply_markup=short_answer_menu(0, show_more=truncated))
-        except Exception as markdown_error:
-            logging.warning(f"Markdown chat response failed; retrying as plain text: {markdown_error}")
-            sent = await bot.send_message(
-                message.chat.id, plain_text,
-                reply_markup=short_answer_menu(0, show_more=truncated))
+        sent = await send_safe_text(
+            chat_id=message.chat.id, text=display_text, parse_mode="Markdown",
+            reply_markup=short_answer_menu(0, show_more=truncated))
         if truncated:
             short_answers_cache[sent.message_id] = full
-        await bot.edit_message_reply_markup(message.chat.id, sent.message_id,
-                                            reply_markup=short_answer_menu(
-                                                sent.message_id, show_more=truncated))
+        await bot.edit_message_reply_markup(
+            chat_id=message.chat.id, message_id=sent.message_id,
+            reply_markup=short_answer_menu(sent.message_id, show_more=truncated))
     except Exception as e:
         chat_sessions.pop(uid, None)
         error_detail = safe_technical_error(e)
         logging.error(f"Gemini API Error: {error_detail}")
-        await bot.send_message(
-            message.chat.id, f"⚠️ خطأ تقني: {error_detail[:100]}",
-            reply_markup=chat_menu())
+        await send_safe_text(
+            chat_id=message.chat.id,
+            text=f"⚠️ خطأ تقني: {error_detail[:100]}", reply_markup=chat_menu())
 
 
 async def show_emergency_plan(cb, subject):
@@ -608,7 +676,7 @@ async def show_emergency_plan(cb, subject):
         [InlineKeyboardButton(text="🔁 برومبت اليوم 3", callback_data=f"em_p3_{subject}")],
         [InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="home")],
     ])
-    await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await cb.message.edit_text(text=text, reply_markup=kb, parse_mode="Markdown")
     await cb.answer()
 
 
@@ -636,11 +704,11 @@ async def show_progress(cb):
         avg = sum(q.get("score", 0) for q in quizzes) / len(quizzes)
         text += f"*📈 متوسط درجاتك:* {avg:.1f}\n"
     text += f"\n💪 _{random.choice(content.ENCOURAGEMENTS)}_"
-    await cb.message.edit_text(text, reply_markup=back_menu(), parse_mode="Markdown")
+    await cb.message.edit_text(text=text, reply_markup=back_menu(), parse_mode="Markdown")
     await cb.answer()
 
 
-async def handle_message(msg):
+async def _handle_message(msg):
     uid = msg.from_user.id
     text = (msg.text or "").strip()
 
@@ -735,7 +803,7 @@ async def handle_message(msg):
         await bot.send_chat_action(chat_id=msg.chat.id, action="typing")
         try:
             result, steps = await asyncio.to_thread(wolfram_solve_sync, text)
-            answer = f"🧮 المسألة: {text}\n\n✅ الإجابة:\n{result}"
+            answer = f"🧮 المسألة:\n{text}\n\n✅ الإجابة:\n{result}"
             if steps:
                 answer += f"\n\n🪜 خطوات الحل:\n{steps}"
             else:
@@ -755,6 +823,11 @@ async def handle_message(msg):
     await msg.answer("👋 استخدم الأزرار للتنقل، أو /chat للدردشة.", reply_markup=main_menu())
 
 
+async def handle_message(msg):
+    async with user_locks[msg.from_user.id]:
+        await _handle_message(msg)
+
+
 async def handle_admin_state(msg, state):
     uid = msg.from_user.id
     if state == "awaiting_add_channel":
@@ -766,7 +839,7 @@ async def handle_admin_state(msg, state):
             ch = "@" + ch
         fs = CONFIG.setdefault("force_subscription", {"enabled": False, "channels": [], "message": ""})
         fs.setdefault("channels", []).append(ch)
-        save_config(CONFIG)
+        await persist_config()
         log_action(msg.from_user, "sub_channel_added", ch)
         await msg.answer(f"✅ تم إضافة {ch}")
         admin_state.pop(uid, None)
@@ -789,7 +862,7 @@ async def handle_admin_state(msg, state):
         CONFIG.setdefault("admins", {})[str(new_id)] = {
             "name": name, "permissions": list(DEFAULT_ADMIN_PERMS),
             "added_at": datetime.utcnow().isoformat(), "added_by": uid}
-        save_config(CONFIG)
+        await persist_config()
         log_action(msg.from_user, "admin_added", str(new_id), f"الاسم: {name}")
         await msg.answer(f"✅ أضفت {name}")
         try:
@@ -803,14 +876,14 @@ async def handle_admin_state(msg, state):
     return False
 
 
-async def handle_callback(cb):
+async def _handle_callback(cb):
     uid = cb.from_user.id
     data = cb.data
     try:
         if data in ("onb_emergency", "onb_backlog", "onb_start", "onb_regular"):
             situation = data.replace("onb_", "")
             update_progress(uid, situation=situation)
-            await cb.message.edit_text(content.ONBOARDING_CURRICULUM,
+            await cb.message.edit_text(text=content.ONBOARDING_CURRICULUM,
                                         reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
         elif data in ("onb_curr_sanaa", "onb_curr_aden"):
             curriculum = "sanaa" if data == "onb_curr_sanaa" else "aden"
@@ -819,16 +892,16 @@ async def handle_callback(cb):
             update_progress(uid, curriculum=curriculum)
             if p.get("onboarding_done"):
                 curriculum_name = {"sanaa": "صنعاء", "aden": "عدن"}[curriculum]
-                await cb.message.edit_text(
+                await cb.message.edit_text(text=
                     f"✅ تم حفظ منهج مدرستك: *وزارة التربية ({curriculum_name})*.",
                     reply_markup=main_menu(), parse_mode="Markdown")
             else:
-                await cb.message.edit_text(content.ONBOARDING_STREAM,
+                await cb.message.edit_text(text=content.ONBOARDING_STREAM,
                                             reply_markup=onboarding_streams_kb(), parse_mode="Markdown")
         elif data in ("onb_sci", "onb_lit"):
             stream = "scientific" if data == "onb_sci" else "literary"
             update_progress(uid, stream=stream)
-            await cb.message.edit_text(content.ONBOARDING_SUBJECT,
+            await cb.message.edit_text(text=content.ONBOARDING_SUBJECT,
                                         reply_markup=onboarding_subjects_kb(stream),
                                         parse_mode="Markdown")
         elif data.startswith("onb_sub_"):
@@ -842,20 +915,20 @@ async def handle_callback(cb):
             text = content.ONBOARDING_DONE.format(
                 situation=situation_ar, curriculum=get_curriculum_ar(uid),
                 stream=stream_ar, subject=subject, next_step=next_step)
-            await cb.message.edit_text(text, reply_markup=main_menu(), parse_mode="Markdown")
+            await cb.message.edit_text(text=text, reply_markup=main_menu(), parse_mode="Markdown")
 
         elif data == "home":
             chat_mode[uid] = False
             wolfram_mode[uid] = False
             chat_sessions.pop(uid, None)
-            await cb.message.edit_text("🏠 *القائمة الرئيسية*",
+            await cb.message.edit_text(text="🏠 *القائمة الرئيسية*",
                                         reply_markup=main_menu(), parse_mode="Markdown")
 
         elif data == "wolfram_start":
             chat_mode[uid] = False
             chat_sessions.pop(uid, None)
             wolfram_mode[uid] = True
-            await cb.message.edit_text(
+            await cb.message.edit_text(text=
                 "🧮 *حل مسألة رياضية*\n\nأرسل المسألة أو المعادلة كنص، وسأطلب حلها من Wolfram|Alpha مع الخطوات المتاحة.",
                 reply_markup=back_menu(), parse_mode="Markdown")
 
@@ -865,22 +938,22 @@ async def handle_callback(cb):
                 [InlineKeyboardButton(text="🧠 برومبت الشرح", callback_data="understand_prompt")],
                 [InlineKeyboardButton(text="🤖 دردشة مع AI", callback_data="chat_start")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(content.PATHWAY_UNDERSTAND, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_UNDERSTAND, reply_markup=kb, parse_mode="Markdown")
         elif data == "pathway_train":
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎯 بنك نجاح", url="https://www.e-najah.net/QsBank/")],
                 [InlineKeyboardButton(text="❓ كويز DeepSeek", callback_data="quiz_prompt")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(content.PATHWAY_TRAIN, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_TRAIN, reply_markup=kb, parse_mode="Markdown")
         elif data == "pathway_review":
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💊 نقاط ضعفي", callback_data="weakness_prompt")],
                 [InlineKeyboardButton(text="🔮 توقع أسئلة", callback_data="predict_prompt")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text(content.PATHWAY_REVIEW, reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text=content.PATHWAY_REVIEW, reply_markup=kb, parse_mode="Markdown")
 
         elif data == "sources":
-            await cb.message.edit_text(content.SOURCES_TEXT, reply_markup=back_menu(),
+            await cb.message.edit_text(text=content.SOURCES_TEXT, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "understand_prompt":
             p = get_progress(uid)
@@ -888,7 +961,7 @@ async def handle_callback(cb):
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text, reply_markup=back_menu(),
+            await cb.message.edit_text(text=text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "quiz_prompt":
             p = get_progress(uid)
@@ -896,14 +969,14 @@ async def handle_callback(cb):
                 topic="[اكتب الموضوع]", subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text, reply_markup=back_menu(),
+            await cb.message.edit_text(text=text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "weakness_prompt":
             p = get_progress(uid)
             text = content.WEAKNESS_PROMPT.format(
                 subject=p.get("subject", "[المادة]"), days=7,
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text, reply_markup=back_menu(),
+            await cb.message.edit_text(text=text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
         elif data == "predict_prompt":
             p = get_progress(uid)
@@ -911,7 +984,7 @@ async def handle_callback(cb):
                 subject=p.get("subject", "[المادة]"),
                 stream="علمي" if p.get("stream") == "scientific" else "أدبي",
                 curriculum_ar=get_curriculum_ar(uid))
-            await cb.message.edit_text(text, reply_markup=back_menu(),
+            await cb.message.edit_text(text=text, reply_markup=back_menu(),
                                         parse_mode="Markdown", disable_web_page_preview=True)
 
         elif data == "my_progress":
@@ -922,20 +995,20 @@ async def handle_callback(cb):
                 [InlineKeyboardButton(text="🌍 تغيير المنهج", callback_data="curriculum_reset")],
                 [InlineKeyboardButton(text="📊 تقدمي", callback_data="my_progress")],
                 [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")]])
-            await cb.message.edit_text("⚙️ *إعداداتي*\n\nاختر:", reply_markup=kb, parse_mode="Markdown")
+            await cb.message.edit_text(text="⚙️ *إعداداتي*\n\nاختر:", reply_markup=kb, parse_mode="Markdown")
         elif data == "curriculum_reset":
-            await cb.message.edit_text(content.ONBOARDING_CURRICULUM,
+            await cb.message.edit_text(text=content.ONBOARDING_CURRICULUM,
                                         reply_markup=onboarding_curriculum_kb(), parse_mode="Markdown")
         elif data == "onb_stream_reset":
             update_progress(uid, onboarding_done=False)
-            await cb.message.edit_text(content.ONBOARDING_SITUATION,
+            await cb.message.edit_text(text=content.ONBOARDING_SITUATION,
                                         reply_markup=onboarding_situations_kb(),
                                         parse_mode="Markdown")
 
         elif data == "emergency":
             p = get_progress(uid)
             stream = p.get("stream", "scientific") or "scientific"
-            await cb.message.edit_text(content.EMERGENCY_START,
+            await cb.message.edit_text(text=content.EMERGENCY_START,
                                         reply_markup=emergency_subjects_kb(stream),
                                         parse_mode="Markdown")
 
@@ -972,13 +1045,13 @@ async def handle_callback(cb):
             wolfram_mode[uid] = False
             chat_mode[uid] = True
             chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
-            await cb.message.edit_text(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
+            await cb.message.edit_text(text=content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="Markdown")
         elif data == "chat_exit":
             chat_mode[uid] = False
             wolfram_mode[uid] = False
             chat_sessions.pop(uid, None)
             streak = update_streak(uid)
-            await cb.message.edit_text(
+            await cb.message.edit_text(text=
                 f"✅ خرجت من الدردشة.\n\n🔥 سلسلة: {streak}\n\n{random.choice(content.ENCOURAGEMENTS)}",
                 reply_markup=main_menu(), parse_mode="Markdown")
 
@@ -998,7 +1071,7 @@ async def handle_callback(cb):
         elif data == "check_sub":
             ok, missing = await check_subscription(uid)
             if ok:
-                await cb.message.edit_text("✅ تم التحقق! أرسل /start للبدء.")
+                await cb.message.edit_text(text="✅ تم التحقق! أرسل /start للبدء.")
             else:
                 await cb.answer(f"❌ لم تشترك في {len(missing)} قناة.", show_alert=True)
 
@@ -1013,7 +1086,7 @@ async def handle_callback(cb):
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ إضافة أدمن", callback_data="admin_add")]])
-            await cb.message.edit_text("👤 إدارة الأدمن", reply_markup=kb)
+            await cb.message.edit_text(text="👤 إدارة الأدمن", reply_markup=kb)
         elif data == "admin_add":
             if not has_perm(uid, "manage_admins"):
                 await cb.answer("⛔", show_alert=True)
@@ -1035,6 +1108,11 @@ async def handle_callback(cb):
             await cb.answer("⚠️ خطأ")
         except Exception:
             pass
+
+
+async def handle_callback(cb):
+    async with user_locks[cb.from_user.id]:
+        await _handle_callback(cb)
 
 
 async def show_admin_panel(msg):
@@ -1090,18 +1168,79 @@ async def keep_alive():
             await asyncio.sleep(30)
 
 
+async def persist_state(offset):
+    global users_dirty, progress_dirty, audit_dirty
+    save_users, save_progress, save_audit = users_dirty, progress_dirty, audit_dirty
+    users_dirty = progress_dirty = audit_dirty = False
+    jobs = [asyncio.to_thread(save_offset, offset)]
+    if save_users:
+        jobs.append(asyncio.to_thread(
+            save_json, "users.json", {"users": copy.deepcopy(users_cache)}))
+    if save_progress:
+        jobs.append(asyncio.to_thread(
+            save_json, "progress.json", {"users": copy.deepcopy(progress_cache)}))
+    if save_audit:
+        jobs.append(asyncio.to_thread(save_json, "audit_log.json", copy.deepcopy(audit_cache)))
+    results = await asyncio.gather(*jobs, return_exceptions=True)
+    if not results[0]:
+        logging.warning("Failed to persist update offset; it will be retried")
+    index = 1
+    if save_users:
+        if results[index] is not True:
+            users_dirty = True
+        index += 1
+    if save_progress:
+        if results[index] is not True:
+            progress_dirty = True
+        index += 1
+    if save_audit and results[index] is not True:
+        audit_dirty = True
+
+
 async def main():
     global users_dirty, progress_dirty, audit_dirty
-    users_cache.update(load_json("users.json", {"users": {}}).get("users", {}))
-    progress_cache.update(load_json("progress.json", {"users": {}}).get("users", {}))
-    audit_cache["logs"] = load_json("audit_log.json", {"logs": []}).get("logs", [])
+    loaded_config, users_data, progress_data, audit_data, offset = await asyncio.gather(
+        asyncio.to_thread(load_config),
+        asyncio.to_thread(load_json, "users.json", {"users": {}}),
+        asyncio.to_thread(load_json, "progress.json", {"users": {}}),
+        asyncio.to_thread(load_json, "audit_log.json", {"logs": []}),
+        asyncio.to_thread(get_offset),
+    )
+    CONFIG.clear()
+    CONFIG.update(loaded_config)
+    users_cache.update(users_data.get("users", {}))
+    progress_cache.update(progress_data.get("users", {}))
+    audit_cache["logs"] = audit_data.get("logs", [])
 
-    offset = get_offset()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + MAX_RUNTIME
     last_save = loop.time()
     retry_delay = 5
     keep_alive_task = None
+    pending_update_tasks = set()
+    dispatch_order = deque()
+    completed_update_ids = set()
+    committed_offset = offset
+
+    async def process_update(update):
+        nonlocal committed_offset
+        try:
+            if update.message and update.message.text:
+                await handle_message(update.message)
+            elif update.callback_query:
+                await handle_callback(update.callback_query)
+            elif update.chat_member:
+                await handle_chat_member(update.chat_member)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logging.exception("update %s failed: %s", update.update_id, error)
+        finally:
+            completed_update_ids.add(update.update_id)
+            while dispatch_order and dispatch_order[0] in completed_update_ids:
+                completed = dispatch_order.popleft()
+                completed_update_ids.remove(completed)
+                committed_offset = completed + 1
 
     try:
         # Telegram long polling conflicts with a configured webhook; clear it first.
@@ -1122,7 +1261,7 @@ async def main():
 
         keep_alive_task = asyncio.create_task(keep_alive(), name="telegram-keep-alive")
 
-        # This polling loop is deliberately bounded by the GitHub Actions runtime.
+        # Poll continuously while per-user locks serialize each student's updates.
         while loop.time() < deadline:
             try:
                 updates = await bot.get_updates(
@@ -1141,32 +1280,17 @@ async def main():
 
             for update in updates:
                 offset = update.update_id + 1
-                try:
-                    if update.message and update.message.text:
-                        await handle_message(update.message)
-                    elif update.callback_query:
-                        await handle_callback(update.callback_query)
-                    elif update.chat_member:
-                        await handle_chat_member(update.chat_member)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logging.exception(f"update {update.update_id} failed: {e}")
+                dispatch_order.append(update.update_id)
+                task = asyncio.create_task(
+                    process_update(update), name=f"telegram-update-{update.update_id}")
+                pending_update_tasks.add(task)
+                task.add_done_callback(pending_update_tasks.discard)
 
             if loop.time() - last_save > 300:
-                save_offset(offset)
-                if users_dirty:
-                    save_json("users.json", {"users": users_cache})
-                    users_dirty = False
-                if progress_dirty:
-                    save_json("progress.json", {"users": progress_cache})
-                    progress_dirty = False
-                if audit_dirty:
-                    save_json("audit_log.json", audit_cache)
-                    audit_dirty = False
+                await persist_state(committed_offset)
                 last_save = loop.time()
 
-        logging.info("Configured bot runtime reached; saving state before exit")
+        logging.info("Configured bot runtime reached; waiting for active updates before saving")
     finally:
         if keep_alive_task is not None:
             keep_alive_task.cancel()
@@ -1174,13 +1298,9 @@ async def main():
                 await keep_alive_task
             except asyncio.CancelledError:
                 pass
-        save_offset(offset)
-        if users_dirty:
-            save_json("users.json", {"users": users_cache})
-        if progress_dirty:
-            save_json("progress.json", {"users": progress_cache})
-        if audit_dirty:
-            save_json("audit_log.json", audit_cache)
+        if pending_update_tasks:
+            await asyncio.gather(*tuple(pending_update_tasks), return_exceptions=True)
+        await persist_state(committed_offset)
         await bot.session.close()
 
 if __name__ == "__main__":
