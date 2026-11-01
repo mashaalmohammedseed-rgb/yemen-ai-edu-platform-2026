@@ -14,16 +14,17 @@
         }
       ],
       "completed_units": [],
-      "quiz_history": []
+      "quiz_history": [],
+      "curriculum": "sanaa"
     },
     "5117740235": {
       "onboarding_done": true,
       "situation": "backlog",
-      "curriculum": "sanaa",
+      "curriculum": "aden",
       "stream": "scientific",
-      "subject": "الإنجليزي",
+      "subject": "الأحياء",
       "streak": 4,
-      "last_session": "2026-11-01T21:23:30.900567",
+      "last_session": "2026-11-01T21:30:38.991676",
       "exams": [
         {
           "subject": "القرآن",
@@ -39,6 +40,10 @@
         },
         {
           "subject": "الإنجليزي",
+          "days": 3
+        },
+        {
+          "subject": "الأحياء",
           "days": 3
         }
       ],
