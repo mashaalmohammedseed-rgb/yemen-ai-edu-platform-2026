@@ -579,10 +579,33 @@ def clean_text(text):
     cleaned = re.sub(r"\^\s*\{2\}|\^2(?!\d)", "²", cleaned)
     cleaned = re.sub(r"\^\s*\{3\}|\^3(?!\d)", "³", cleaned)
     cleaned = cleaned.replace(r"\times", "×").replace(r"\div", "÷")
+    cleaned = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*", "", cleaned)
+    cleaned = re.sub(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$", "\n\n", cleaned)
+    cleaned = re.sub(r"(?m)^[ \t]{0,3}>[ \t]?", "", cleaned)
+    cleaned = re.sub(r"(?m)^[ \t]*```[^\n]*$", "", cleaned)
+    cleaned = cleaned.replace("`", "")
+    cleaned = re.sub(r"\*{2,}([^*\n]+?)\*{2,}", r"*\1*", cleaned)
+    cleaned = re.sub(r"\*{2,}", "", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def plain_text_from_markdown(text):
+    plain = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*", "", str(text or ""))
+    plain = re.sub(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$", "", plain)
+    plain = re.sub(r"(?m)^[ \t]{0,3}>[ \t]?", "", plain)
+    plain = re.sub(r"(?m)^[ \t]*```[^\n]*$", "", plain).replace("`", "")
+    plain = re.sub(r"\*{2,}([^*\n]+?)\*{2,}", r"\1", plain)
+    plain = re.sub(r"(?<!\w)\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?!\w)", r"\1", plain)
+    plain = re.sub(r"(?<!\w)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)", r"\1", plain)
+    plain = re.sub(r"\[(.*?)\]\((https?://[^)\s]+)\)", r"\1 (\2)", plain)
+    plain = re.sub(r"(?<=\w)[ \t]*\*[ \t]*(?=\w)", " × ", plain).replace("*", "")
+    plain = re.sub(r"[ \t]{2,}", " ", plain)
+    plain = re.sub(r" *\n *", "\n", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return plain.strip()
 
 
 def split_telegram_text(text, limit=3900):
@@ -631,6 +654,7 @@ async def send_safe_text(chat_id, text, reply_markup=None, parse_mode="Markdown"
             logging.warning("Formatted Telegram send failed (%s); retrying as plain text",
                             type(send_error).__name__)
             params.pop("parse_mode", None)
+            params["text"] = plain_text_from_markdown(chunk)
             sent = await bot.send_message(**params)
     return sent
 
