@@ -58,7 +58,7 @@ audit_dirty = False
 def load_config():
     try:
         r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
-                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=5)
         if r.status_code == 200:
             return json.loads(base64.b64decode(r.json()["content"]).decode())
     except Exception as e:
@@ -74,7 +74,7 @@ def save_config(cfg):
     try:
         with github_write_lock:
             r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
-                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=5)
             sha = r.json().get("sha") if r.status_code == 200 else None
             data = {"message": f"config {datetime.utcnow().isoformat()}",
                     "content": base64.b64encode(
@@ -83,7 +83,7 @@ def save_config(cfg):
                 data["sha"] = sha
             response = requests.put(
                 f"https://api.github.com/repos/{GITHUB_REPO}/contents/config.json",
-                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=data, timeout=10)
+                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=data, timeout=5)
             response.raise_for_status()
             return True
     except Exception as e:
@@ -94,7 +94,7 @@ def save_config(cfg):
 def load_json(filename, default):
     try:
         r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+                         headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=5)
         if r.status_code == 200:
             return json.loads(base64.b64decode(r.json()["content"]).decode())
     except Exception as e:
@@ -106,7 +106,7 @@ def save_json(filename, data):
     try:
         with github_write_lock:
             r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+                             headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=5)
             sha = r.json().get("sha") if r.status_code == 200 else None
             payload = {"message": f"update {filename} {datetime.utcnow().isoformat()}",
                        "content": base64.b64encode(
@@ -115,7 +115,7 @@ def save_json(filename, data):
                 payload["sha"] = sha
             response = requests.put(
                 f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=payload, timeout=10)
+                headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=payload, timeout=5)
             response.raise_for_status()
             return True
     except Exception as e:
@@ -408,24 +408,51 @@ def short_answer_menu(msg_id, show_more=True):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def wolfram_solve_sync(problem):
-    app_id = os.getenv("WOLFRAM_APPID")
-    if not app_id:
-        raise RuntimeError("مفتاح Wolfram غير مضبوط. أضف WOLFRAM_APPID إلى GitHub Secrets.")
+ARABIC_MATH_REPLACEMENTS = {
+    "احسب": "",
+    "حل": "solve",
+    "تكامل": "integrate",
+    "مشتقة": "derivative",
+    "معادلة": "equation",
+    "جذر": "sqrt",
+    "أوجد": "find",
+    "ما هو": "what is",
+    # Common definite-article forms of the same requested terms.
+    "المعادلة": "equation",
+    "المشتقة": "derivative",
+    "الجذر": "sqrt",
+    "المسألة": "",
+    "اوجد": "find",
+}
 
+
+def normalize_wolfram_problem(problem):
     normalized = problem.strip()
-    for prefix in (
-        "حل المسألة", "حل المعادلة", "أوجد حل المسألة", "اوجد حل المسألة",
-        "أوجد", "اوجد", "احسب", "حل", "المعادلة", "المسألة",
-        "ما قيمة", "كم يساوي", "ناتج",
-    ):
-        while normalized.startswith(prefix):
-            normalized = normalized[len(prefix):].strip(" :：")
+    arabic_letters = r"\u0600-\u06FF"
+    for arabic, english in sorted(
+            ARABIC_MATH_REPLACEMENTS.items(), key=lambda item: len(item[0]), reverse=True):
+        pattern = re.compile(
+            rf"(?<![{arabic_letters}]){re.escape(arabic)}(?![{arabic_letters}])")
+        normalized = pattern.sub(english, normalized)
     normalized = normalized.translate(str.maketrans(
         "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789"))
     normalized = normalized.replace("×", "*").replace("÷", "/").replace("−", "-")
     if any(operator in normalized for operator in ("=", "+", "-", "*", "/", "^")):
         normalized = normalized.replace("س", "x").replace("ص", "y")
+    normalized = re.sub(r"\s+", " ", normalized).strip(" :：؛,،")
+    if "=" in normalized:
+        expression = re.sub(
+            r"\b(?:solve|find|what\s+is|equation)\b", " ", normalized, flags=re.IGNORECASE)
+        normalized = "solve " + re.sub(r"\s+", " ", expression).strip(" :：؛,،")
+    return normalized
+
+
+def wolfram_solve_sync(problem):
+    app_id = os.getenv("WOLFRAM_APPID")
+    if not app_id:
+        raise RuntimeError("مفتاح Wolfram غير مضبوط. أضف WOLFRAM_APPID إلى GitHub Secrets.")
+
+    normalized = normalize_wolfram_problem(problem)
     if not normalized:
         raise RuntimeError("أرسل نص المسألة أو المعادلة أولاً.")
     if len(normalized) > 800:
@@ -439,11 +466,11 @@ def wolfram_solve_sync(problem):
         "podstate": "Result__Step-by-step solution",
     }
     if "=" in normalized:
-        params["input"] = f"solve {normalized}"
+        params["input"] = normalized
         params["scanner"] = "Solve"
 
     response = requests.get(
-        "https://api.wolframalpha.com/v2/query", params=params, timeout=(5, 25))
+        "https://api.wolframalpha.com/v2/query", params=params, timeout=5)
     if response.status_code != 200:
         raise RuntimeError(f"خدمة Wolfram أعادت HTTP {response.status_code}.")
     payload = response.json().get("queryresult", {})
@@ -513,7 +540,7 @@ def wikipedia_summary_sync(query):
         headers={
             "User-Agent": "YemenStudyBot/1.0 (https://github.com/mashaalmohammedseed-rgb/yemen-ai-edu-platform-2026/issues; educational Telegram bot)"
         },
-        timeout=(5, 15),
+        timeout=5,
     )
     if response.status_code != 200:
         return None
@@ -630,7 +657,9 @@ async def chat_with_ai(message):
             session = get_user_model(uid).start_chat(history=[])
             chat_sessions[uid] = session
         trim_chat_history(session)
-        response = await session.send_message_async(chat_text)
+        response = await asyncio.wait_for(
+            session.send_message_async(chat_text, request_options={"timeout": 5}),
+            timeout=5)
         full = clean_text(response.text)
         if wikipedia_url:
             full += f"\n\n📚 المصدر:\n{wikipedia_url}"
