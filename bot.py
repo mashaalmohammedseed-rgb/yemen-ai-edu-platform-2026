@@ -663,11 +663,32 @@ def markdown_to_html(text):
 class TelegramHTMLMiddleware(BaseRequestMiddleware):
     async def __call__(self, make_request, bot_instance, method):
         if isinstance(method, (SendMessage, EditMessageText)):
+            original_text = method.text
             if method.parse_mode is None:
                 method.text = plain_text_from_markdown(method.text)
-            else:
-                method.text = markdown_to_html(method.text)
-                method.parse_mode = "HTML"
+                try:
+                    return await make_request(bot_instance, method)
+                except Exception as send_error:
+                    logging.error("Telegram plain-text delivery failed (%s): %s",
+                                  type(send_error).__name__, send_error, exc_info=True)
+                    raise
+
+            method.text = markdown_to_html(original_text)
+            method.parse_mode = "HTML"
+            try:
+                return await make_request(bot_instance, method)
+            except Exception as html_error:
+                logging.error("Telegram HTML delivery failed (%s): %s; retrying as plain text",
+                              type(html_error).__name__, html_error, exc_info=True)
+                method.text = plain_text_from_markdown(original_text)
+                method.parse_mode = None
+                try:
+                    return await make_request(bot_instance, method)
+                except Exception as fallback_error:
+                    logging.error("Telegram plain-text fallback failed (%s): %s",
+                                  type(fallback_error).__name__, fallback_error,
+                                  exc_info=True)
+                    raise
         return await make_request(bot_instance, method)
 
 
