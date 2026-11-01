@@ -351,6 +351,7 @@ def back_menu():
 
 def chat_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 محادثة جديدة", callback_data="chat_new")],
         [InlineKeyboardButton(text="🏠 الخروج من الدردشة", callback_data="chat_exit")]
     ])
 
@@ -658,8 +659,8 @@ async def chat_with_ai(message):
             chat_sessions[uid] = session
         trim_chat_history(session)
         response = await asyncio.wait_for(
-            session.send_message_async(chat_text, request_options={"timeout": 5}),
-            timeout=5)
+            session.send_message_async(chat_text, request_options={"timeout": 60}),
+            timeout=60)
         full = clean_text(response.text)
         if wikipedia_url:
             full += f"\n\n📚 المصدر:\n{wikipedia_url}"
@@ -685,6 +686,13 @@ async def chat_with_ai(message):
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id, message_id=sent.message_id,
             reply_markup=short_answer_menu(sent.message_id, show_more=truncated))
+    except asyncio.TimeoutError:
+        chat_sessions.pop(uid, None)
+        logging.warning("Gemini generation exceeded the 60-second timeout for user %s", uid)
+        await send_safe_text(
+            chat_id=message.chat.id,
+            text="⚠️ عذراً، استغرق توليد الإجابة وقتاً طويلاً. حاول مرة أخرى.",
+            reply_markup=chat_menu(), parse_mode=None)
     except Exception as e:
         chat_sessions.pop(uid, None)
         error_detail = safe_technical_error(e)
@@ -793,10 +801,17 @@ async def _handle_message(msg):
         return
 
     if text == "/help":
-        await msg.answer("📖 *أوامر:*\n/start — البداية\n/chat — دردشة\n/exit — خروج\n"
+        await msg.answer("📖 *أوامر:*\n/start — البداية\n/chat — دردشة\n/newchat — محادثة جديدة\n/exit — خروج\n"
                          "/progress — تقدمي\n🧮 حل مسألة — زر في القائمة الرئيسية\n"
                          "/admin — لوحة التحكم\n/help — مساعدة",
                          parse_mode="Markdown")
+        return
+
+    if text == "/newchat":
+        wolfram_mode[uid] = False
+        chat_mode[uid] = True
+        chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+        await msg.answer("✅ تم بدء محادثة جديدة.", reply_markup=chat_menu(), parse_mode=None)
         return
 
     if text == "/chat":
@@ -853,7 +868,13 @@ async def _handle_message(msg):
 
 
 async def handle_message(msg):
-    async with user_locks[msg.from_user.id]:
+    lock = user_locks[msg.from_user.id]
+    if lock.locked():
+        await msg.answer(
+            "⚠️ يرجى الانتظار حتى ينتهي البوت من الرد على رسالتك السابقة.",
+            parse_mode=None)
+        return
+    async with lock:
         await _handle_message(msg)
 
 
@@ -1070,6 +1091,12 @@ async def _handle_callback(cb):
             await cb.message.answer(f"🔁 *برومبت اليوم 3 — {subject}*\n\n`{prompt}`\n\n🔗 https://chat.deepseek.com",
                                     parse_mode="Markdown")
 
+        elif data == "chat_new":
+            wolfram_mode[uid] = False
+            chat_mode[uid] = True
+            chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+            await cb.message.edit_text(
+                text="✅ تم بدء محادثة جديدة.", reply_markup=chat_menu(), parse_mode=None)
         elif data == "chat_start":
             wolfram_mode[uid] = False
             chat_mode[uid] = True
