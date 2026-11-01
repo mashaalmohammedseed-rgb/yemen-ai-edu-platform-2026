@@ -41,6 +41,10 @@ GEMINI_TIMEOUT_ERRORS = (
     google_api_exceptions.RetryError,
     google_api_exceptions.ServiceUnavailable,
 )
+GEMINI_QUOTA_ERRORS = (
+    google_api_exceptions.ResourceExhausted,
+    google_api_exceptions.TooManyRequests,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -832,6 +836,14 @@ async def chat_with_ai(message):
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id, message_id=sent.message_id,
             reply_markup=short_answer_menu(sent.message_id, show_more=truncated))
+    except GEMINI_QUOTA_ERRORS as e:
+        chat_sessions.pop(uid, None)
+        logging.error("Gemini request quota/rate limit reached for user %s: %s",
+                      uid, safe_technical_error(e), exc_info=True)
+        await send_safe_text(
+            chat_id=message.chat.id,
+            text="⚠️ وصلت خدمة الذكاء الاصطناعي مؤقتاً إلى حد الطلبات المتاح. انتظر دقيقة ثم حاول مرة أخرى. إذا استمرت المشكلة، يحتاج مالك البوت إلى مراجعة حصة Gemini.",
+            reply_markup=chat_menu(), parse_mode=None)
     except GEMINI_TIMEOUT_ERRORS as e:
         chat_sessions.pop(uid, None)
         logging.error("Gemini connection timed out for user %s: %s",
