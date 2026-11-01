@@ -15,8 +15,8 @@
       "last_name": "",
       "username": "KING_MISHAL10",
       "joined_at": "2026-10-29T02:49:43.302604",
-      "last_seen": "2026-11-01T19:03:44.601085",
-      "messages_count": 81
+      "last_seen": "2026-11-01T19:21:28.914409",
+      "messages_count": 85
     },
     "1593880276": {
       "id": 1593880276,
@@ -223,6 +223,15 @@
       "username": "A_VIP_B",
       "joined_at": "2026-11-01T19:08:03.175765",
       "last_seen": "2026-11-01T19:08:03.175765",
+      "messages_count": 1
+    },
+    "9150994100": {
+      "id": 9150994100,
+      "first_name": "🎀🎀",
+      "last_name": "",
+      "username": "",
+      "joined_at": "2026-11-01T19:19:21.205232",
+      "last_seen": "2026-11-01T19:19:21.205232",
       "messages_count": 1
     }
   }
