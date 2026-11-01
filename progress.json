@@ -18,12 +18,12 @@
     },
     "5117740235": {
       "onboarding_done": true,
-      "situation": "regular",
+      "situation": "backlog",
       "curriculum": "sanaa",
       "stream": "scientific",
-      "subject": "الإسلامية",
+      "subject": "الإنجليزي",
       "streak": 4,
-      "last_session": "2026-11-01T19:03:44.601110",
+      "last_session": "2026-11-01T19:21:28.914465",
       "exams": [
         {
           "subject": "القرآن",
@@ -35,6 +35,10 @@
         },
         {
           "subject": "الإسلامية",
+          "days": 3
+        },
+        {
+          "subject": "الإنجليزي",
           "days": 3
         }
       ],
@@ -311,6 +315,18 @@
       "curriculum": null,
       "stream": null,
       "subject": null,
+      "streak": 0,
+      "last_session": null,
+      "exams": [],
+      "completed_units": [],
+      "quiz_history": []
+    },
+    "9150994100": {
+      "onboarding_done": true,
+      "situation": "regular",
+      "curriculum": "aden",
+      "stream": "scientific",
+      "subject": "الكيمياء",
       "streak": 0,
       "last_session": null,
       "exams": [],
