@@ -12,39 +12,54 @@ import re
 import threading
 from collections import defaultdict, deque
 import requests
+import httpx
 from datetime import datetime
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, EditMessageText
-import google.generativeai as genai
-from google.api_core import exceptions as google_api_exceptions
 import content
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPOSITORY")
+GEMINI_API_KEYS = list(dict.fromkeys(
+    key.strip()
+    for value in (os.getenv("GEMINI_API_KEYS", ""), os.getenv("GEMINI_API_KEY", ""))
+    for key in value.split(",")
+    if key.strip()
+))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 MAX_RUNTIME = 5.75 * 3600  # 345 minutes; keep a 10-minute buffer under the 355-minute job timeout
 KEEP_ALIVE_INTERVAL = 300
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 AI_MODEL_NAME = "gemini-3.8-flash"
+GROQ_MODEL_NAME = "openai/gpt-oss-20b"
+GEMINI_GENERATE_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL_NAME}:generateContent")
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 CHAT_HISTORY_LIMIT = 6
 GEMINI_TIMEOUT_ERRORS = (
     asyncio.TimeoutError,
     TimeoutError,
+    httpx.TimeoutException,
+    httpx.NetworkError,
     requests.exceptions.Timeout,
     requests.exceptions.ConnectionError,
-    google_api_exceptions.DeadlineExceeded,
-    google_api_exceptions.GatewayTimeout,
-    google_api_exceptions.RetryError,
-    google_api_exceptions.ServiceUnavailable,
 )
-GEMINI_QUOTA_ERRORS = (
-    google_api_exceptions.ResourceExhausted,
-    google_api_exceptions.TooManyRequests,
-)
+
+
+class GeminiQuotaError(Exception):
+    pass
+
+
+class GroqQuotaError(Exception):
+    pass
+
+
+class AIProvidersUnavailable(Exception):
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -67,6 +82,10 @@ short_answers_cache = {}
 user_locks = defaultdict(asyncio.Lock)
 github_write_lock = threading.Lock()
 config_save_lock = asyncio.Lock()
+fallback_status_lock = asyncio.Lock()
+fallback_provider_state = {"provider": "gemini"}
+gemini_key_cursor = 0
+gemini_key_cursor_lock = asyncio.Lock()
 
 users_cache, users_dirty = {}, False
 progress_cache, progress_dirty = {}, False
@@ -207,7 +226,7 @@ def get_curriculum_ar(uid):
     return {"sanaa": "صنعاء", "aden": "عدن"}.get(curriculum, "غير محدد")
 
 
-def get_user_model(uid):
+def get_user_system_prompt(uid):
     progress = get_progress(uid)
     situation_ar = {
         "emergency": "لديه امتحان قريب",
@@ -217,29 +236,170 @@ def get_user_model(uid):
     }.get(progress.get("situation"), "غير محدد")
     stream_ar = {"scientific": "علمي", "literary": "أدبي"}.get(
         progress.get("stream"), "غير محدد")
-    return genai.GenerativeModel(
-        model_name=AI_MODEL_NAME,
-        system_instruction=content.AI_SYSTEM_PROMPT.format(
-            curriculum_ar=get_curriculum_ar(uid),
-            stream_ar=stream_ar,
-            subject_ar=progress.get("subject") or "غير محددة",
-            situation_ar=situation_ar)
-    )
+    return content.AI_SYSTEM_PROMPT.format(
+        curriculum_ar=get_curriculum_ar(uid),
+        stream_ar=stream_ar,
+        subject_ar=progress.get("subject") or "غير محددة",
+        situation_ar=situation_ar)
 
 
-def trim_chat_history(session):
-    history = session.history
+def trim_chat_history(history):
     if len(history) > CHAT_HISTORY_LIMIT:
-        session.history = history[-CHAT_HISTORY_LIMIT:]
+        del history[:-CHAT_HISTORY_LIMIT]
 
 
 def safe_technical_error(error):
     detail = str(error).replace("\n", " ").strip()
-    for secret in (os.getenv("GEMINI_API_KEY"), os.getenv("WOLFRAM_APPID"),
-                   TELEGRAM_TOKEN, GITHUB_TOKEN):
+    secrets = (*GEMINI_API_KEYS, GROQ_API_KEY, os.getenv("WOLFRAM_APPID"),
+               TELEGRAM_TOKEN, GITHUB_TOKEN)
+    for secret in secrets:
         if secret:
             detail = detail.replace(secret, "[REDACTED]")
     return detail or type(error).__name__
+
+
+def response_error_detail(response):
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            error = body.get("error", {})
+            if isinstance(error, dict) and error.get("message"):
+                return str(error["message"])[:700]
+            return str(body)[:700]
+    except Exception:
+        pass
+    return response.text[:700]
+
+
+def gemini_contents(history, user_text):
+    contents = []
+    for turn in history[-CHAT_HISTORY_LIMIT:]:
+        role = "user" if turn.get("role") == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": turn.get("text", "")}]})
+    contents.append({"role": "user", "parts": [{"text": user_text}]})
+    return contents
+
+
+async def post_json(url, headers, payload, timeout=None):
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(url, headers=headers, json=payload)
+
+
+async def gemini_generate_async(api_key, system_prompt, history, user_text):
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": gemini_contents(history, user_text),
+    }
+    response = await post_json(
+        GEMINI_GENERATE_URL,
+        {"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        payload,
+        timeout=None)
+    detail = response_error_detail(response)
+    if response.status_code == 429:
+        raise GeminiQuotaError(f"Gemini HTTP 429: {detail}")
+    if not response.is_success:
+        raise RuntimeError(f"Gemini HTTP {response.status_code}: {detail}")
+    data = response.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidate text")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    answer = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+    if not answer.strip():
+        raise RuntimeError("Gemini returned an empty answer")
+    return answer.strip()
+
+
+async def groq_generate_async(system_prompt, history, user_text):
+    messages = [{"role": "system", "content": system_prompt}]
+    for turn in history[-CHAT_HISTORY_LIMIT:]:
+        role = "user" if turn.get("role") == "user" else "assistant"
+        messages.append({"role": role, "content": turn.get("text", "")})
+    messages.append({"role": "user", "content": user_text})
+    response = await post_json(
+        GROQ_CHAT_URL,
+        {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        {"model": GROQ_MODEL_NAME, "messages": messages},
+        timeout=60.0)
+    detail = response_error_detail(response)
+    if response.status_code == 429:
+        raise GroqQuotaError(f"Groq HTTP 429: {detail}")
+    if not response.is_success:
+        raise RuntimeError(f"Groq HTTP {response.status_code}: {detail}")
+    choices = response.json().get("choices") or []
+    answer = choices[0].get("message", {}).get("content") if choices else None
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("Groq returned an empty answer")
+    return answer.strip()
+
+
+async def update_ai_provider_status(provider, alert_text=None):
+    async with fallback_status_lock:
+        if fallback_provider_state.get("provider") == provider:
+            return
+        fallback_provider_state["provider"] = provider
+        if alert_text:
+            await notify_owner(alert_text, parse_mode=None)
+
+
+async def rotated_gemini_keys():
+    global gemini_key_cursor
+    if not GEMINI_API_KEYS:
+        return []
+    async with gemini_key_cursor_lock:
+        start = gemini_key_cursor % len(GEMINI_API_KEYS)
+        gemini_key_cursor = (start + 1) % len(GEMINI_API_KEYS)
+        return GEMINI_API_KEYS[start:] + GEMINI_API_KEYS[:start]
+
+
+async def generate_chat_reply(uid, history, user_text):
+    system_prompt = get_user_system_prompt(uid)
+    failures = []
+    keys_to_try = await rotated_gemini_keys()
+    for key_index, api_key in enumerate(keys_to_try, start=1):
+        try:
+            answer = await gemini_generate_async(api_key, system_prompt, history, user_text)
+            await update_ai_provider_status("gemini")
+            return answer
+        except Exception as error:
+            failures.append(error)
+            logging.error("Gemini key %s/%s failed (%s): %s", key_index,
+                          len(GEMINI_API_KEYS), type(error).__name__,
+                          safe_technical_error(error))
+
+    all_gemini_quotas_exhausted = bool(failures) and all(
+        isinstance(error, GeminiQuotaError) for error in failures)
+    if not GEMINI_API_KEYS:
+        logging.error("No Gemini API keys configured; attempting Groq fallback")
+
+    if GROQ_API_KEY:
+        try:
+            answer = await groq_generate_async(system_prompt, history, user_text)
+        except Exception as groq_error:
+            logging.error("Groq fallback failed (%s): %s", type(groq_error).__name__,
+                          safe_technical_error(groq_error))
+            if (all_gemini_quotas_exhausted
+                    and isinstance(groq_error, GroqQuotaError)):
+                alert = "⚠️ تنبيه: نفدت جميع الحصص، البوت متوقف مؤقتاً"
+            else:
+                alert = "⚠️ تنبيه: تعذر استخدام Gemini وGroq، والبوت متوقف مؤقتاً"
+            await update_ai_provider_status("unavailable", alert)
+            raise AIProvidersUnavailable("All AI providers failed") from groq_error
+
+        if all_gemini_quotas_exhausted:
+            alert = "⚠️ تنبيه: نفدت حصة Gemini، البوت يعمل الآن على Groq"
+        else:
+            alert = "⚠️ تنبيه: تعذر استخدام Gemini، البوت يعمل الآن على Groq"
+        await update_ai_provider_status("groq", alert)
+        return answer
+
+    if all_gemini_quotas_exhausted:
+        alert = "⚠️ تنبيه: نفدت حصة Gemini ولا يوجد مفتاح Groq احتياطي، البوت متوقف مؤقتاً"
+    else:
+        alert = "⚠️ تنبيه: تعذر استخدام مفاتيح Gemini ولا يوجد مفتاح Groq احتياطي"
+    await update_ai_provider_status("unavailable", alert)
+    raise AIProvidersUnavailable("No AI provider is available")
 
 
 def update_progress(uid, **kwargs):
@@ -807,11 +967,16 @@ async def chat_with_ai(message):
                     type(wiki_error).__name__)
         session = chat_sessions.get(uid)
         if not session:
-            session = get_user_model(uid).start_chat(history=[])
+            session = []
             chat_sessions[uid] = session
         trim_chat_history(session)
-        response = await session.send_message_async(chat_text)
-        full = clean_text(response.text)
+        answer = await generate_chat_reply(uid, session, chat_text)
+        session.extend([
+            {"role": "user", "text": chat_text},
+            {"role": "assistant", "text": answer},
+        ])
+        trim_chat_history(session)
+        full = clean_text(answer)
         if wikipedia_url:
             full += f"\n\n📚 المصدر:\n{wikipedia_url}"
         trim_chat_history(session)
@@ -836,13 +1001,13 @@ async def chat_with_ai(message):
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id, message_id=sent.message_id,
             reply_markup=short_answer_menu(sent.message_id, show_more=truncated))
-    except GEMINI_QUOTA_ERRORS as e:
+    except AIProvidersUnavailable as e:
         chat_sessions.pop(uid, None)
-        logging.error("Gemini request quota/rate limit reached for user %s: %s",
-                      uid, safe_technical_error(e), exc_info=True)
+        logging.error("All AI providers failed for user %s: %s", uid,
+                      safe_technical_error(e), exc_info=True)
         await send_safe_text(
             chat_id=message.chat.id,
-            text="⚠️ وصلت خدمة الذكاء الاصطناعي مؤقتاً إلى حد الطلبات المتاح. انتظر دقيقة ثم حاول مرة أخرى. إذا استمرت المشكلة، يحتاج مالك البوت إلى مراجعة حصة Gemini.",
+            text="⚠️ عذراً، الخوادم مشغولة جداً حالياً بسبب الضغط. يرجى المحاولة بعد دقيقة.",
             reply_markup=chat_menu(), parse_mode=None)
     except GEMINI_TIMEOUT_ERRORS as e:
         chat_sessions.pop(uid, None)
@@ -977,14 +1142,14 @@ async def _handle_message(msg):
     if text == "/newchat":
         wolfram_mode[uid] = False
         chat_mode[uid] = True
-        chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+        chat_sessions[uid] = []
         await msg.answer("✅ تم بدء محادثة جديدة.", reply_markup=chat_menu(), parse_mode=None)
         return
 
     if text == "/chat":
         wolfram_mode[uid] = False
         chat_mode[uid] = True
-        chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+        chat_sessions[uid] = []
         await msg.answer(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="HTML")
         return
 
@@ -1272,13 +1437,13 @@ async def _handle_callback(cb):
         elif data == "chat_new":
             wolfram_mode[uid] = False
             chat_mode[uid] = True
-            chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+            chat_sessions[uid] = []
             await cb.message.edit_text(
                 text="✅ تم بدء محادثة جديدة.", reply_markup=chat_menu(), parse_mode=None)
         elif data == "chat_start":
             wolfram_mode[uid] = False
             chat_mode[uid] = True
-            chat_sessions[uid] = get_user_model(uid).start_chat(history=[])
+            chat_sessions[uid] = []
             await cb.message.edit_text(text=content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="HTML")
         elif data == "chat_exit":
             chat_mode[uid] = False
