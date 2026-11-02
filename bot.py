@@ -15,7 +15,12 @@ import requests
 import httpx
 from datetime import datetime
 from aiogram import Bot, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, EditMessageText
@@ -519,6 +524,20 @@ def main_menu():
         kb.append(row)
     kb.append([InlineKeyboardButton(text="🧮 حل مسألة", callback_data="wolfram_start")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def persistent_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📚 المصادر"), KeyboardButton(text="🧠 الفهم والشرح")],
+            [KeyboardButton(text="🎯 التدريب"), KeyboardButton(text="🧮 حل مسألة")],
+            [KeyboardButton(text="💬 دردشة"), KeyboardButton(text="📊 تقدمي")],
+            [KeyboardButton(text="⚙️ الإعدادات")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="اختر ما تريد فعله",
+    )
 
 
 def back_menu():
@@ -1049,8 +1068,7 @@ async def show_emergency_plan(cb, subject):
     await cb.answer()
 
 
-async def show_progress(cb):
-    uid = cb.from_user.id
+def progress_text(uid, first_name):
     p = get_progress(uid)
     streak = calculate_streak(uid)
     situation_map = {"emergency": "🔥 امتحان قريب", "backlog": "⏰ منهج متراكم",
@@ -1062,7 +1080,7 @@ async def show_progress(cb):
     stream = stream_map.get(p.get("stream"), "غير محدد")
     curriculum = curriculum_map.get(p.get("curriculum"), "غير محدد")
     quizzes = p.get("quiz_history", [])
-    text = (f"📊 *تقدمك يا {cb.from_user.first_name or 'صديقي'}*\n\n"
+    text = (f"📊 *تقدمك يا {first_name or 'صديقي'}*\n\n"
             f"*وضعك:* {situation}\n"
             f"*المنهج:* {curriculum}\n"
             f"*قسمك:* {stream}\n"
@@ -1073,8 +1091,66 @@ async def show_progress(cb):
         avg = sum(q.get("score", 0) for q in quizzes) / len(quizzes)
         text += f"*📈 متوسط درجاتك:* {avg:.1f}\n"
     text += f"\n💪 _{random.choice(content.ENCOURAGEMENTS)}_"
+    return text
+
+
+async def show_progress(cb):
+    text = progress_text(cb.from_user.id, cb.from_user.first_name)
     await cb.message.edit_text(text=text, reply_markup=back_menu(), parse_mode="HTML")
     await cb.answer()
+
+
+async def handle_persistent_menu_button(msg, text):
+    uid = msg.from_user.id
+    if text == "📚 المصادر":
+        await send_safe_text(
+            chat_id=msg.chat.id, text=content.SOURCES_TEXT,
+            reply_markup=back_menu(), parse_mode="HTML",
+            disable_web_page_preview=True)
+    elif text == "🧠 الفهم والشرح":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📚 المصادر", callback_data="sources")],
+            [InlineKeyboardButton(text="🧠 برومبت الشرح", callback_data="understand_prompt")],
+            [InlineKeyboardButton(text="🤖 دردشة مع AI", callback_data="chat_start")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")],
+        ])
+        await msg.answer(content.PATHWAY_UNDERSTAND, reply_markup=kb, parse_mode="HTML")
+    elif text == "🎯 التدريب":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 بنك نجاح", url="https://www.e-najah.net/QsBank/")],
+            [InlineKeyboardButton(text="❓ كويز DeepSeek", callback_data="quiz_prompt")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")],
+        ])
+        await msg.answer(content.PATHWAY_TRAIN, reply_markup=kb, parse_mode="HTML")
+    elif text == "🧮 حل مسألة":
+        chat_mode[uid] = False
+        chat_sessions.pop(uid, None)
+        wolfram_mode[uid] = True
+        await msg.answer(
+            "🧮 <b>حل مسألة رياضية</b>\n\nأرسل المسألة أو المعادلة كنص، "
+            "وسأطلب حلها من Wolfram|Alpha مع الخطوات المتاحة.",
+            reply_markup=back_menu(), parse_mode="HTML")
+    elif text == "💬 دردشة":
+        wolfram_mode[uid] = False
+        chat_mode[uid] = True
+        chat_sessions[uid] = []
+        await msg.answer(content.CHAT_WELCOME, reply_markup=chat_menu(), parse_mode="HTML")
+    elif text == "📊 تقدمي":
+        await send_safe_text(
+            chat_id=msg.chat.id,
+            text=progress_text(uid, msg.from_user.first_name),
+            reply_markup=back_menu(), parse_mode="HTML")
+    elif text == "⚙️ الإعدادات":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 تغيير المادة", callback_data="onb_stream_reset")],
+            [InlineKeyboardButton(text="🌍 تغيير المنهج", callback_data="curriculum_reset")],
+            [InlineKeyboardButton(text="📊 تقدمي", callback_data="my_progress")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="home")],
+        ])
+        await msg.answer("⚙️ <b>إعداداتي</b>\n\nاختر:", reply_markup=kb, parse_mode="HTML")
+    else:
+        return False
+    return True
 
 
 async def _handle_message(msg):
@@ -1107,18 +1183,24 @@ async def _handle_message(msg):
     if state and await handle_admin_state(msg, state):
         return
 
+    if await handle_persistent_menu_button(msg, text):
+        return
+
     if text in ("/start", "/menu"):
         chat_mode[uid] = False
         wolfram_mode[uid] = False
         chat_sessions.pop(uid, None)
         p = get_progress(uid)
         if p.get("onboarding_done") and not p.get("curriculum"):
+            await msg.answer("لوحة التنقل جاهزة أسفل الشاشة.",
+                             reply_markup=persistent_menu())
             await msg.answer(content.ONBOARDING_CURRICULUM,
                              reply_markup=onboarding_curriculum_kb(), parse_mode="HTML")
             return
         if not p.get("onboarding_done"):
             update_progress(uid, onboarding_done=False)
-            await msg.answer(content.ONBOARDING_WELCOME, parse_mode="HTML")
+            await msg.answer(content.ONBOARDING_WELCOME,
+                             reply_markup=persistent_menu(), parse_mode="HTML")
             await msg.answer(content.ONBOARDING_SITUATION,
                              reply_markup=onboarding_situations_kb(), parse_mode="HTML")
             return
@@ -1129,7 +1211,7 @@ async def _handle_message(msg):
             name=msg.from_user.first_name or "", progress_summary=summary,
             streak=streak, streak_badge=badge,
             next_action="استخدم الأزرار للبدء 👇"),
-            reply_markup=main_menu(), parse_mode="HTML")
+            reply_markup=persistent_menu(), parse_mode="HTML")
         return
 
     if text == "/help":
