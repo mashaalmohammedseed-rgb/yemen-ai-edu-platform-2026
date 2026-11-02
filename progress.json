@@ -280,8 +280,8 @@
     },
     "8849050087": {
       "onboarding_done": false,
-      "situation": null,
-      "curriculum": null,
+      "situation": "emergency",
+      "curriculum": "sanaa",
       "stream": null,
       "subject": null,
       "streak": 0,
